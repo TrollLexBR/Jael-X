@@ -21,6 +21,8 @@
 	Status reports distance/FOV/input blockers; RightCtrl opens settings.
 	Name ESP reads ContentText: confirmed readable on Jael X 1.30 while Text
 	fails with "Unsupported string layout" for these PlayerTag labels.
+	Health follows visible PlayerTag.Health.Percent; hidden templates are not HP.
+	Gray bars marked HP ? mean the client has not exposed a usable health value.
 ]]
 
 --=========================== LIFECYCLE ==========================--
@@ -86,7 +88,8 @@ local function running() return APP.alive and ENV.PF_ASSIST == APP end
 local function read(o, k)
 	if not o then return nil end
 	local ok, value = pcall(function() return o[k] end)
-	return ok and value or nil
+	if ok then return value end
+	return nil
 end
 local function children(o)
 	local ok, result = pcall(function() return o:GetChildren() end)
@@ -138,6 +141,15 @@ local function readPlayerName(label)
 	end
 	return nil
 end
+local function refreshHealth(e)
+	-- The tag may arrive after the body or replace its frames during a respawn.
+	e.healthFrame, e.healthBar = nil, nil
+	local ok, container, fill = pcall(function()
+		local frame = e.label:FindFirstChild("Health")
+		return frame, frame and frame:FindFirstChild("Percent")
+	end)
+	if ok then e.healthFrame, e.healthBar = container, fill end
+end
 local function resolve(model)
 	local e = { model = model, parts = {} }
 	for _, part in ipairs(children(model)) do
@@ -151,8 +163,7 @@ local function resolve(model)
 						if label:IsA("TextLabel") then
 							e.label = label
 							e.name = readPlayerName(label)
-							local health = label:FindFirstChild("Health")
-							e.healthBar = health and health:FindFirstChild("Percent")
+							refreshHealth(e)
 						end
 					end
 				end
@@ -187,10 +198,13 @@ local function refreshRoster()
 			if model:IsA("Model") then
 				local key = model
 				local old = APP.visuals[key]
-				local ok, e = pcall(function() return old and old.entity or resolve(model) end)
+				local ok, e = pcall(function()
+					return old and read(old.entity.label,"Parent") and old.entity or resolve(model)
+				end)
 				if ok and e then
 					e.key = key
 					e.name = readPlayerName(e.label) or e.name
+					refreshHealth(e)
 					seen[key] = true
 					nextRoster[#nextRoster + 1] = e
 				end
@@ -211,17 +225,13 @@ local function classify(e)
 	if c.G > 0.7 and c.R < 0.35 then return false end
 	return nil
 end
-local function alive(e)
+local function alive(e, hp)
 	if not read(e.model, "Parent") then return false end
-	local size = read(e.healthBar, "Size")
-	if size and size.X and type(size.X.Scale) == "number" then
-		return size.X.Scale > 0
-	end
-	return true
+	return hp == nil or hp > 0
 end
 local function visual(e)
 	local v = APP.visuals[e.key]
-	if v then return v end
+	if v then v.entity=e;return v end
 	v = { entity = e, boxes = {} }
 	APP.visuals[e.key] = v
 	v.tag = Drawing.new("Text")
@@ -252,8 +262,19 @@ local function extended(e)
 	return v
 end
 local function health(e)
+	-- A hidden enemy tag can keep the template's full width. It is not verified HP.
+	if not e.healthFrame or read(e.healthFrame,"Visible") == false then return nil end
 	local size = read(e.healthBar,"Size")
-	if size and size.X and type(size.X.Scale)=="number" then return math.clamp(size.X.Scale,0,1) end
+	if not size or not size.X then return nil end
+	local scale, offset = size.X.Scale, size.X.Offset or 0
+	if type(scale)~="number" or scale~=scale or type(offset)~="number" then return nil end
+	if offset~=0 then
+		local parentSize=read(e.healthFrame,"AbsoluteSize")
+		if not parentSize or parentSize.X<=0 then return nil end
+		scale=scale+offset/parentSize.X
+	end
+	if scale<0 or scale>1 then return nil end
+	return scale
 end
 local function activation()
 	local key = CFG.aimKey
@@ -292,7 +313,7 @@ local function renderEntity(state, selected, view)
 			v.tag.Text=name..(CFG.nameDistance and string.format(" [%d studs]",math.floor(distance)) or "")
 			v.tag.Position,v.tag.Color,v.tag.Size,v.tag.Outline,v.tag.Visible=Vector2.new(top.X,y-CFG.nameSize-3),color,CFG.nameSize,CFG.nameOutline,true
 		end
-		if state.hp then
+		if state.hp ~= nil then
 			if CFG.healthBars then
 				v.healthBg.Position,v.healthBg.Size,v.healthBg.Color,v.healthBg.Visible=Vector2.new(x-7,y),Vector2.new(4,height),Color3.fromRGB(20,20,20),true
 				v.healthFill.Position,v.healthFill.Size,v.healthFill.Color,v.healthFill.Visible=Vector2.new(x-6,y+height*(1-state.hp)),Vector2.new(2,height*state.hp),Color3.new(1-state.hp,state.hp,.15),true
@@ -301,6 +322,13 @@ local function renderEntity(state, selected, view)
 				v.healthLabel.Text=string.format("%d%%",math.floor(state.hp*100+.5));v.healthLabel.Position=Vector2.new(top.X,y+height+3)
 				v.healthLabel.Color,v.healthLabel.Size,v.healthLabel.Visible=color,CFG.nameSize,true
 			end
+		elseif CFG.healthBars or CFG.healthText then
+			-- Unknown health stays visibly distinct instead of displaying a fake 100%.
+			if CFG.healthBars then
+				v.healthBg.Position,v.healthBg.Size,v.healthBg.Color,v.healthBg.Visible=Vector2.new(x-7,y),Vector2.new(4,height),Color3.fromRGB(95,100,110),true
+			end
+			v.healthLabel.Text="HP ?";v.healthLabel.Position=Vector2.new(top.X,y+height+3)
+			v.healthLabel.Size,v.healthLabel.Color,v.healthLabel.Visible=CFG.nameSize,Color3.fromRGB(180,185,195),true
 		end
 	end
 	if CFG.tracers then
@@ -327,6 +355,7 @@ local function frame(dt)
 	hideAll();targetLine.Visible=false;for _,d in ipairs(cross) do d.Visible=false end
 	APP.menuOpen=APP.Library and APP.Library.Visible and APP.window and APP.window.visible or false
 	APP.stats.enemies,APP.stats.allies,APP.stats.unknown,APP.stats.target=0,0,0,nil
+	APP.stats.healthKnown,APP.stats.healthUnknown=0,0
 	local camera=workspace.CurrentCamera;local cf=read(camera,"CFrame");local view=Drawing3D.GetViewportSize()
 	if not cf or view.X<1 or view.Y<1 then ring.Visible=false;return end
 	local center=Vector2.new(view.X/2,view.Y/2)
@@ -338,11 +367,13 @@ local function frame(dt)
 		local ok,err=pcall(function()
 			local enemy=classify(e);if enemy==nil then APP.stats.unknown=APP.stats.unknown+1;return end
 			if enemy then APP.stats.enemies=APP.stats.enemies+1 else APP.stats.allies=APP.stats.allies+1 end
-			if not alive(e) then return end
+			local hp=health(e)
+			if hp==nil then APP.stats.healthUnknown=APP.stats.healthUnknown+1 else APP.stats.healthKnown=APP.stats.healthKnown+1 end
+			if not alive(e,hp) then return end
 			local head=read(e.head,"Position");if not head then return end
 			local distance=(head-cf.Position).Magnitude;if distance<4 then return end
 			local screen,on=Drawing3D.WorldToViewportPoint(head);if not on or screen.Z<=0 then return end
-			local state={e=e,enemy=enemy,position=head,distance=distance,screen=screen,hp=health(e)}
+			local state={e=e,enemy=enemy,position=head,distance=distance,screen=screen,hp=hp}
 			if distance<=CFG.visualRange and (enemy or CFG.showAllies) then states[#states+1]=state end
 			if CFG.teamCheck and not enemy or distance>CFG.maxDistance then return end
 			local aimPosition=CFG.targetPart=="Torso" and read(e.torso,"Position") or head
@@ -448,7 +479,7 @@ local okUI,whyUI=pcall(function()
 	slider(detail,"thickness","Line thickness",1,4,.5)
 	slider(detail,"nameSize","ESP text size",8,24,1)
 	toggle(detail,"nameOutline","Text outline")
-	detail:AddParagraph({text="2D bounds and chams approximate the R6 body. They do not trace walls or render mesh silhouettes. Health is shown only when the client exposes its health bar."})
+	detail:AddParagraph({text="2D bounds and chams approximate the R6 body. Health reads the visible game nametag, not server health. Hidden or unavailable health appears gray with HP ?. Lowest health skips unknown values."})
 	local style=w:NewTab("Appearance","Colors and screen elements")
 	local colors=style:NewSection("Overlay colors","left")
 	for _,entry in ipairs({{"enemyColor","Enemy color"},{"allyColor","Ally color"},{"targetColor","Target color"},{"fovColor","FOV / crosshair color"}})do
