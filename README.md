@@ -2,6 +2,8 @@
 
 ![JoX Library preview](assets/preview.png)
 
+# https://discord.gg/akgCMsmeuC
+
 A reusable Lua 5.4 interface library for Jael X. It uses the app's native external Drawing primitives, not Roblox GUI instances. Dark framed layout, accent strip, sidebar tabs, two independent scrolling columns, rounded sections and floating popups.
 
 ## Files and loading
