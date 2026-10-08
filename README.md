@@ -4,7 +4,7 @@
 
 # https://discord.gg/akgCMsmeuC
 
-A reusable Lua 5.4 interface library for Jael X. It uses the app's native external Drawing primitives, not Roblox GUI instances. Refined dark layout, searchable pages, sidebar navigation with pinned Configs, two independent scrolling columns, rounded cards and floating popups.
+A reusable Lua 5.4 interface library for Jael X. It uses the app's native external Drawing primitives, not Roblox GUI instances. Compact wine-colored layout inspired by the supplied reference: horizontal tabs, fine borders, square checkboxes, filled sliders, two scrolling columns and floating popups. All existing builders, callbacks, handles and configuration flags are retained.
 
 ## Files and loading
 
@@ -74,7 +74,7 @@ enabled:SetValue(false, true) -- Silent update.
 | API | Behavior |
 |---|---|
 | `Library:NewWindow(opts)` / `:Window(opts)` | Multiple draggable, resizable windows. `title`, `subtitle`, `configId`, `x`, `y`, `width`, `height`, `configs`, `configAliases`. |
-| `window:NewTab(title, description, opts?)` / `:Tab(...)` | Sidebar navigation; optional `icon` (short text) and `badge`. Configs stays last and is pinned at the bottom. |
+| `window:NewTab(title, description, opts?)` / `:Tab(...)` | Horizontal navigation. The optional tab metadata is retained; Configs stays last. Scroll the tab bar if it overflows. |
 | `window:SetSearch(text)` / `:GetSearch()` | Filter the active page by section, control name and tooltip. Ctrl+K focuses search. |
 | `window:ResetDefaults(includeAppearance?)` | Reset feature values and fire callbacks. Pass `true` to include Configs/appearance. |
 | `tab:NewSection(title, column)` / `:Section(...)` | `left`, `right`, or `full`; do not mix full with side columns on a tab. |
@@ -118,7 +118,7 @@ The automatic **Configs** tab is always last. It includes named config save/load
 
 Use explicit stable flags to preserve settings when labels change. Pass `configAliases={oldFlag=newFlag}` to migrate old keys. Window position, dimensions, element values, keybind modes and the settings in Configs are saved. Configs load on user request; they are not automatically applied to a new script.
 
-`Library:SetThemePreset(name)` applies Violet, Ocean, Emerald, Rose or Amber; Configs provides the same presets. Explicit custom colors survive saving/loading a profile. `Library:SetTheme({accent=Color3.fromRGB(...)})` updates colors globally. Theme keys: `background`, `panel`, `header`, `field`, `border`, `text`, `muted`, `accent`, `danger`, `success`. Appearance and notification settings apply across the library's windows. Per-script feature colors use their own ColorPicker controls.
+`Library:SetThemePreset(name)` applies Wine, Violet, Ocean, Emerald, Rose or Amber; Configs provides the same presets. Explicit custom colors survive saving/loading a profile. `Library:SetTheme({accent=Color3.fromRGB(...)})` updates colors globally. Theme keys: `background`, `panel`, `header`, `field`, `border`, `text`, `muted`, `accent`, `danger`, `success`. Appearance and notification settings apply across the library's windows. Per-script feature colors use their own ColorPicker controls.
 
 `Library:Notify(title, body, duration?, kind?)` shows a wrapped notification with lifetime indicator. `kind="error"` uses the danger color; `kind="success"` uses the success color. It returns a handle with `Dismiss()`; each notice also has a close button. The Configs tab controls visibility, duration and screen corner. Up to five notifications are retained.
 
@@ -141,3 +141,9 @@ The existing builder/handle API and raw loader URL remain compatible. The compon
 Preview images below are rendered from captured Drawing commands, not screenshots of a live Jael X session. Native typography and performance still need validation inside Jael X.
 
 ![Color Studio preview](assets/color-studio.png)
+
+## Version 1.1.1 visual refresh
+
+Only the presentation and default palette change. The methods, callback payloads, flags, configuration namespace and loading URL stay compatible with 1.1.0. Existing scripts can use the new layout without changing their builders. Wine is the new default accent, and previously saved custom colors still restore normally.
+
+The reference layout uses horizontal tabs, compact checkbox rows, thin magenta separators and filled sliders with centered editable values. Sections keep their two independent scroll areas, and search and the HSV/RGB/HEX color picker remain available. Validation includes clicking the new checkbox/field positions, configuration roundtrip, color editing and the Fisch integration. Preview images are offline renders.

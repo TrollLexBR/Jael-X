@@ -10,21 +10,21 @@ local HTTP = game:GetService("HttpService")
 assert(immediate and immediate.push_clip and font, "JoX Library requires Jael X with clipping support")
 local previous=shared.JoXLibrary or shared.JaelDrawingUI
 if previous and previous.Unload then pcall(function() previous:Unload() end) end
-local Library = { Version = "1.1.0", Windows = {}, Connections = {}, Alive = true, Visible = true, ToggleKey = "RightControl",
-	Rounding = 8, Notifications = true, NotificationDuration = 4, NotificationPosition = "Bottom right" }
+local Library = { Version = "1.1.1", Windows = {}, Connections = {}, Alive = true, Visible = true, ToggleKey = "RightControl",
+	Rounding = 2, Notifications = true, NotificationDuration = 4, NotificationPosition = "Bottom right" }
 shared.JaelDrawingUI = Library
 shared.JoXLibrary = Library
 local Theme = {
-	background = Color3.fromRGB(15,18,26), panel = Color3.fromRGB(21,26,37),
-	header = Color3.fromRGB(31,36,51), field = Color3.fromRGB(28,34,47),
-	border = Color3.fromRGB(43,51,68), text = Color3.fromRGB(231,233,242),
-	muted = Color3.fromRGB(143,150,172), accent = Color3.fromRGB(166,139,250),
+	background = Color3.fromRGB(19,9,15), panel = Color3.fromRGB(24,11,18),
+	header = Color3.fromRGB(33,15,24), field = Color3.fromRGB(31,14,23),
+	border = Color3.fromRGB(57,25,41), text = Color3.fromRGB(211,197,204),
+	muted = Color3.fromRGB(146,118,132), accent = Color3.fromRGB(160,36,84),
 	danger = Color3.fromRGB(241,99,120), success = Color3.fromRGB(92,214,154),
 }
 Library.Theme = Theme
 local themeDefaults={};for k,v in pairs(Theme) do themeDefaults[k]=v end
-local themePresets={Violet={166,139,250},Ocean={56,189,248},Emerald={52,211,153},Rose={251,113,133},Amber={251,191,36}}
-Library.ThemePresets={"Violet","Ocean","Emerald","Rose","Amber"}
+local themePresets={Wine={160,36,84},Violet={166,139,250},Ocean={56,189,248},Emerald={52,211,153},Rose={251,113,133},Amber={251,191,36}}
+Library.ThemePresets={"Wine","Violet","Ocean","Emerald","Rose","Amber"}
 local fonts, notifications, hits = {}, {}, {}
 local mouse = Vector2.new(0,0)
 local drag, slider, editing, capture, popup, hover
@@ -311,7 +311,7 @@ function Library:NewWindow(opts)
 		s:AddButton({text="Restore feature defaults",callback=function()local count=w:ResetDefaults();Library:Notify("Defaults restored",count.." controls reset")end})
 		s:AddParagraph({text="Configs restore callbacks. Explicit flags stay stable when visible labels change. Files are stored in Jael X script-data/JaelUI."})
 		local appearance=tab:NewSection("Appearance","right")
-		appearance:AddDropdown({text="Theme preset",flag="_uiPreset",options=Library.ThemePresets,default="Violet",callback=function(v)Library:SetThemePreset(v)end})
+		appearance:AddDropdown({text="Theme preset",flag="_uiPreset",options=Library.ThemePresets,default="Wine",callback=function(v)Library:SetThemePreset(v)end})
 		for _,entry in ipairs({{"Accent color","accent"},{"Background","background"},{"Section background","panel"},{"Header / popups","header"},{"Input background","field"},{"Borders","border"},{"Main text","text"},{"Secondary text","muted"}}) do
 			local key=entry[2]
 			appearance:AddColorPicker({text=entry[1],flag="_uiColor/"..key,default=Theme[key],callback=function(v)Theme[key]=v end})
@@ -340,7 +340,7 @@ function Library:SetVisible(v) self.Visible=not not v;clearFocus() end
 function Library:IsInteracting() return running() and self.Visible and (editing~=nil or drag~=nil or slider~=nil or popup~=nil or capture~=nil) end
 function Library:IsMouseOverUI()
 	if not self.Visible then return false end
-	for _,w in ipairs(self.Windows) do if w.visible and inside(mouse,w.x,w.y,w.width,w.minimized and 62 or w.height) then return true end end
+	for _,w in ipairs(self.Windows) do if w.visible and inside(mouse,w.x,w.y,w.width,w.minimized and 28 or w.height) then return true end end
 	return false
 end
 function Library:Notify(title,body,duration,kind)
@@ -375,11 +375,11 @@ local function wrap(value,width,size)
 	return result
 end
 local function controlHeight(c,width)
-	if c.kind=="divider" then return 18 end
-	if c.kind=="paragraph" then return #wrap(c.title,width-28)*18+12 end
-	if c.kind=="slider" or c.kind=="input" or c.kind=="dropdown" then return 60 end
-	if c.kind=="progress" then return 50 end
-	return 36
+	if c.kind=="divider"then return 12 end
+	if c.kind=="paragraph"then return #wrap(c.title,width-24,12)*16+10 end
+	if c.kind=="slider" or c.kind=="input" or c.kind=="dropdown"then return 40 end
+	if c.kind=="progress"then return 36 end
+	return 24
 end
 local function valueText(c)
 	if c.kind=="dropdown" and c.multi then return #c.value==0 and "None selected" or table.concat(c.value,", ") end
@@ -398,112 +398,96 @@ local function renderControl(c,x,y,width,clipTop,clipBottom)
 	if y+height<clipTop or y>clipBottom then return height end
 	local active=y>=clipTop and y+height<=clipBottom
 	local fg=c.disabled and Theme.muted or Theme.text
-	local function interact(bx,by,bw,bh,fn)
-		if active then buttonHit(c,bx,by,bw,bh,fn) end
-	end
-	if c.kind=="divider" then line(x+14,y+8,width-28);return height end
-	if c.kind=="paragraph" then for i,s in ipairs(wrap(c.title,width-28)) do text(x+14,y+4+(i-1)*18,s,Theme.muted) end;return height end
-	if c.kind=="label" then
+	local function interact(bx,by,bw,bh,fn)if active then buttonHit(c,bx,by,bw,bh,fn)end end
+	if c.kind=="divider"then line(x+10,y+5,width-20);return height end
+	if c.kind=="paragraph"then for i,s in ipairs(wrap(c.title,width-24,12))do text(x+12,y+4+(i-1)*16,s,Theme.muted,12)end;return height end
+	if c.kind=="label"then
 		local v=c.title;if c.getter then local ok,result=pcall(c.getter);if ok then v=result end end
-		text(x+14,y+9,v,fg);return height
+		text(x+12,y+4,v,fg,12);return height
 	end
-	if c.kind=="button" then
-		local color=not c.disabled and (c.style=="primary" and Theme.accent or c.style=="danger" and Theme.danger) or Theme.field
-		rect(x+14,y+3,width-28,29,color,5)
-		if inside(mouse,x+14,y+3,width-28,29)then rect(x+14,y+3,width-28,29,Theme.text,5,false)end
-		text(x+24,y+10,c.title,not c.disabled and c.style=="primary" and Theme.background or fg)
-		interact(x+14,y+3,width-28,29,function() callback(c.callback) end);return height
+	if c.kind=="button"then
+		local color=not c.disabled and (c.style=="primary" and Theme.accent or c.style=="danger" and Theme.danger)or Theme.field
+		rect(x+12,y+2,width-24,19,color,1);rect(x+12,y+2,width-24,19,inside(mouse,x+12,y+2,width-24,19)and Theme.accent or Theme.border,1,false)
+		text(x+20,y+5,c.title,fg,12)
+		interact(x+12,y+2,width-24,19,function()callback(c.callback)end);return height
 	end
-	text(x+14,y+7,c.title,fg)
-	if c.kind=="toggle" then
-		rect(x+width-51,y+8,35,19,c.value and Theme.accent or Theme.field,9)
-		immediate.circle(Vector2.new(x+width-(c.value and 25 or 42),y+17),6,true,false,Theme.text)
-		interact(x+10,y,width-20,height,function() set(c,not c.value) end)
-	elseif c.kind=="slider" then
+	text(x+(c.kind=="toggle" and 31 or 12),y+3,c.title,fg,12)
+	if c.kind=="toggle"then
+		rect(x+12,y+4,12,12,c.value and Theme.accent or Theme.field,1)
+		rect(x+12,y+4,12,12,c.value and Theme.accent or Theme.border,1,false)
+		interact(x+9,y,width-18,height,function()set(c,not c.value)end)
+	elseif c.kind=="slider"then
+		local bx,bw=x+12,width-24;local fraction=(c.value-c.min)/(c.max-c.min)
+		rect(bx,y+21,bw,12,Theme.field,1);rect(bx,y+21,math.max(1,bw*fraction),12,Theme.accent,1);rect(bx,y+21,bw,12,Theme.border,1,false)
 		local display=editing and editing.control==c and editing.buffer.."|" or string.format("%.4g",c.value)
-		rect(x+width-84,y+3,68,22,Theme.field,4);text(x+width-77,y+7,display,Theme.accent)
-		interact(x+width-84,y+3,68,22,function() startEdit(c,function(v)set(c,v)end,c.value) end)
-		local barX,barW=x+16,width-32
-		rect(barX,y+37,barW,5,Theme.field,3)
-		local fraction=(c.value-c.min)/(c.max-c.min)
-		rect(barX,y+37,math.max(1,barW*fraction),5,Theme.accent,3)
-		immediate.circle(Vector2.new(barX+barW*fraction,y+39),5,true,false,Theme.accent)
-		interact(barX,y+29,barW,20,function() beginSlider(c,barX,barW) end)
-		if active and not c.disabled then hit(x+12,y,width-24,height,nil,c.tooltip,c.window,function(delta)set(c,c.value+delta*(c.step or (c.max-c.min)/100))end) end
-	elseif c.kind=="input" or c.kind=="dropdown" then
-		rect(x+14,y+27,width-28,27,Theme.field,4)
+		text(bx+bw/2-#display*2.7,y+21,display,fg,11)
+		interact(bx,y+18,bw,19,function()beginSlider(c,bx,bw)end)
+		interact(bx+bw/2-30,y+21,60,12,function()startEdit(c,function(v)set(c,v)end,c.value)end)
+		if active and not c.disabled then hit(bx,y,bw,height,nil,c.tooltip,c.window,function(delta)set(c,c.value+delta*(c.step or (c.max-c.min)/100))end)end
+	elseif c.kind=="input" or c.kind=="dropdown"then
+		rect(x+12,y+19,width-24,18,Theme.field,1);rect(x+12,y+19,width-24,18,Theme.border,1,false)
 		local value=editing and editing.control==c and editing.buffer.."|" or valueText(c)
-		clip(x+21,y+28,width-56,25);text(x+23,y+33,value=="" and c.placeholder or value,fg);immediate.pop_clip()
-		if c.kind=="dropdown" then text(x+width-32,y+33,"v",Theme.muted) end
-		interact(x+14,y+27,width-28,27,function()
-			if c.kind=="input" then startEdit(c,function(v)set(c,v)end,c.value)
-			else popup=popup and popup.control==c and nil or {control=c,x=x+14,y=y+56,width=width-28,scroll=0} end
+		clip(x+17,y+20,width-44,16);text(x+18,y+21,value=="" and c.placeholder or value,fg,11);immediate.pop_clip()
+		if c.kind=="dropdown"then text(x+width-24,y+21,"+",Theme.muted,11)end
+		interact(x+12,y+19,width-24,18,function()
+			if c.kind=="input"then startEdit(c,function(v)set(c,v)end,c.value)
+			else popup=popup and popup.control==c and nil or {control=c,x=x+12,y=y+39,width=width-24,scroll=0}end
 		end)
-	elseif c.kind=="keybind" then
+	elseif c.kind=="keybind"then
 		local binding=capture==c and "Press a key..." or c.value
-		rect(x+width-128,y+4,112,26,Theme.field,4);text(x+width-119,y+10,binding,Theme.accent)
-		interact(x+width-128,y+4,112,26,function() capture=c;popup=nil;editing=nil end)
-	elseif c.kind=="color" then
-		rect(x+width-92,y+6,76,22,Color3.fromRGB(table.unpack(c.value)),4)
-		interact(x+width-92,y+6,76,22,function() popup=popup and popup.control==c and nil or {control=c,x=x+width-230,y=y+36,width=282} end)
-	elseif c.kind=="progress" then
-		local v=c.value;if c.getter then local ok,result=pcall(c.getter);if ok then v=result end end;v=finite(v) and clamp(v,0,1) or 0
-		rect(x+14,y+29,width-28,7,Theme.field,4);rect(x+14,y+29,math.max(1,(width-28)*v),7,Theme.accent,4)
+		rect(x+width-114,y+2,102,18,Theme.field,1);rect(x+width-114,y+2,102,18,Theme.border,1,false)
+		text(x+width-106,y+5,binding,Theme.muted,11)
+		interact(x+width-114,y+2,102,18,function()capture=c;popup=nil;editing=nil end)
+	elseif c.kind=="color"then
+		rect(x+width-37,y+6,24,11,Color3.fromRGB(table.unpack(c.value)),0);rect(x+width-38,y+5,26,13,Theme.border,0,false)
+		interact(x+width-40,y+1,31,21,function()popup=popup and popup.control==c and nil or {control=c,x=x+width-282,y=y+24,width=282}end)
+	elseif c.kind=="progress"then
+		local v=c.value;if c.getter then local ok,result=pcall(c.getter);if ok then v=result end end;v=finite(v)and clamp(v,0,1)or 0
+		rect(x+12,y+21,width-24,8,Theme.field,0);rect(x+12,y+21,math.max(1,(width-24)*v),8,Theme.accent,0)
 	end
 	return height
 end
 local function renderWindow(w)
-	local x,y,width,height=w.x,w.y,w.width,w.minimized and 62 or w.height
+	local x,y,width,height=w.x,w.y,w.width,w.minimized and 28 or w.height
 	hit(x,y,width,height,function()clearFocus()end,nil,w,function()end)
-	rect(x+6,y+9,width,height,Color3.fromRGB(7,9,14),12)
-	rect(x,y,width,height,Theme.background,10);rect(x,y,width,height,Theme.border,10,false)
-	rect(x+18,y+17,32,32,Theme.accent,8);text(x+26,y+22,"J",Theme.background,21)
-	clip(x+62,y+10,width-440,43)
-	text(x+62,y+13,w.title,Theme.text,20);text(x+62,y+39,w.subtitle,Theme.muted,10);immediate.pop_clip()
-	text(x+width-66,y+21,w.minimized and "+" or "-",Theme.muted,18);text(x+width-35,y+21,"x",Theme.muted,16)
-	hit(x+width-78,y+10,32,36,function()w.minimized=not w.minimized;clearFocus()end,"Minimize",w)
-	hit(x+width-43,y+10,32,36,function()w:SetVisible(false)end,"Hide window",w)
-	hit(x+8,y+6,width-90,51,function()drag={window=w,dx=mouse.X-x,dy=mouse.Y-y}end,nil,w)
+	rect(x+4,y+5,width,height,Color3.fromRGB(8,3,7),0)
+	rect(x,y,width,height,Theme.background,1);rect(x,y,width,height,Theme.border,1,false)
+	rect(x+3,y+3,width-6,height-6,Theme.accent,0,false)
+	clip(x+12,y+5,width-290,18);text(x+12,y+7,w.title,Theme.muted,12);immediate.pop_clip()
+	text(x+width-46,y+6,w.minimized and "+"or "-",Theme.muted,12);text(x+width-25,y+6,"x",Theme.muted,12)
+	hit(x+width-52,y+4,21,19,function()w.minimized=not w.minimized;clearFocus()end,"Minimize",w)
+	hit(x+width-29,y+4,21,19,function()w:SetVisible(false)end,"Hide window",w)
+	hit(x+6,y+4,width-65,20,function()drag={window=w,dx=mouse.X-x,dy=mouse.Y-y}end,nil,w)
 	region(x,y,width,height)
 	if w.minimized then return end
 	w.searchControl=w.searchControl or {kind="input",maxLength=64,window=w}
 	local query=editing and editing.control==w.searchControl and editing.buffer or w.query
-	local sx,sw=x+width-340,244
-	rect(sx,y+18,sw,29,Theme.field,6);rect(sx,y+18,sw,29,Theme.border,6,false)
-	clip(sx+12,y+20,sw-45,25);text(sx+12,y+26,query=="" and "Search this page..." or query,query=="" and Theme.muted or Theme.text,12);immediate.pop_clip()
-	text(sx+sw-31,y+26,query=="" and "/" or "x",Theme.muted,12)
-	hit(sx,y+18,sw-32,29,function()startEdit(w.searchControl,function(v)w:SetSearch(v)end,w.query)end,"Search control names and descriptions",w)
-	if query~=""then hit(sx+sw-32,y+18,32,29,function()editing=nil;w:SetSearch("")end,"Clear search",w)end
-	local side=188
-	rect(x+1,y+63,side,height-64,Theme.panel,0);line(x+1,y+62,width-2)
-	text(x+20,y+83,"WORKSPACE",Theme.muted,10)
-	local config=w.tabs[#w.tabs];if not config or not config._config then config=nil end
-	local regular=#w.tabs-(config and 1 or 0)
-	local navHeight=height-188;local navTotal=regular*52
-	w.tabScroll=clamp(w.tabScroll,0,math.max(0,navTotal-navHeight))
-	local function nav(t,i,ty)
+	local sx,sw=x+width-239,175
+	rect(sx,y+6,sw,17,Theme.field,1)
+	clip(sx+6,y+7,sw-23,15);text(sx+6,y+8,query==""and "Search... / Ctrl+K"or query,Theme.muted,10);immediate.pop_clip()
+	hit(sx,y+6,sw-20,17,function()startEdit(w.searchControl,function(v)w:SetSearch(v)end,w.query)end,"Search this page",w)
+	if query~=""then text(sx+sw-13,y+8,"x",Theme.muted,10);hit(sx+sw-20,y+6,20,17,function()editing=nil;w:SetSearch("")end,"Clear search",w)end
+	local nx,nw,ny,nh=x+12,width-24,y+32,29
+	local tabWidth=math.max(94,nw/math.max(1,#w.tabs));local navTotal=tabWidth*#w.tabs
+	w.tabScroll=clamp(w.tabScroll,0,math.max(0,navTotal-nw))
+	clip(nx,ny,nw,nh)
+	for i,t in ipairs(w.tabs)do
+		local tx=nx+(i-1)*tabWidth-w.tabScroll
 		local active=w.active==t
-		if active or inside(mouse,x+10,ty,side-20,44)then rect(x+10,ty,side-20,44,Theme.header,6)end
-		if active then rect(x+10,ty+10,3,24,Theme.accent,1)end
-		rect(x+22,ty+12,21,21,active and Theme.accent or Theme.field,5)
-		text(x+28,ty+16,t.icon or (t._config and "C" or tostring(i)),active and Theme.background or Theme.muted,10)
-		text(x+54,ty+8,t.title,active and Theme.text or Theme.muted,14)
-		clip(x+54,ty+25,side-68,17);text(x+54,ty+27,t.description,Theme.muted,10);immediate.pop_clip()
-		if t.badge then text(x+side-33,ty+8,tostring(t.badge),Theme.accent,10)end
-		hit(x+10,ty,side-20,44,function()t:Select()end,nil,w)
-	end
-	clip(x+8,y+106,side-15,navHeight)
-	for i=1,regular do local ty=y+106+(i-1)*52-w.tabScroll
-		if ty>=y+106 and ty+44<=y+106+navHeight then nav(w.tabs[i],i,ty)end
+		rect(tx,ny,tabWidth-2,nh,active and Theme.header or Theme.panel,0);rect(tx,ny,tabWidth-2,nh,Theme.border,0,false)
+		if active then line(tx+1,ny+nh-2,tabWidth-4,Theme.accent)end
+		local label=t.icon and (tostring(t.icon).." "..t.title)or t.title
+		clip(tx+6,ny+5,tabWidth-(t.badge and 42 or 14),20);text(tx+tabWidth/2-#label*3,ny+8,label,active and Theme.accent or Theme.muted,12);immediate.pop_clip()
+		if t.badge then text(tx+tabWidth-27,ny+8,tostring(t.badge),Theme.accent,10)end
+		if tx>=nx and tx+tabWidth-2<=nx+nw then hit(tx,ny,tabWidth-2,nh,function()t:Select()end,t.description,w)end
 	end
 	immediate.pop_clip()
-	hit(x+8,y+106,side-15,navHeight,nil,nil,w,function(d)w.tabScroll=clamp(w.tabScroll-d*36,0,math.max(0,navTotal-navHeight))end)
-	line(x+18,y+height-80,side-36)
-	if config then nav(config,#w.tabs,y+height-70)end
-	text(x+20,y+height-18,"JOX  /  "..Library.Version,Theme.muted,10)
+	hit(nx,ny,nw,nh,nil,nil,w,function(d)w.tabScroll=clamp(w.tabScroll-d*64,0,math.max(0,navTotal-nw))end)
 	local t=w.active;if not t then return end
-	local cx,cy,cw,ch=x+side+18,y+128,width-side-35,height-167
-	text(cx,y+83,t.title,Theme.text,22);text(cx,y+112,t.description,Theme.muted,12)
+	local cx,cy,cw,ch=x+16,y+94,width-32,height-120
+	text(cx+7,y+73,t.title,Theme.accent,12)
+	clip(cx+110,y+70,cw-117,18);text(cx+110,y+74,t.description,Theme.muted,11);immediate.pop_clip()
+	line(cx,y+88,cw,Theme.border)
 	local needle=query:lower()
 	local function matches(c,s)
 		return c.visible and (needle=="" or (s.title.." "..c.title.." "..(c.tooltip or "")):lower():find(needle,1,true)~=nil)
@@ -528,25 +512,25 @@ local function renderWindow(w)
 		local colX=cx+(index-1)*(colWidth+14)
 		local total=0
 		for _,s in ipairs(t.sections) do if sectionShown(s) and s.column==column then
-			local h=37
-			if not s.collapsed or needle~=""then for _,c in ipairs(s.elements)do if matches(c,s)then h=h+controlHeight(c,colWidth)end end;h=h+8 end
-			s.height=h;total=total+h+14
+			local h=25
+			if not s.collapsed or needle~=""then for _,c in ipairs(s.elements)do if matches(c,s)then h=h+controlHeight(c,colWidth)end end;h=h+6 end
+			s.height=h;total=total+h+10
 		end end
 		t.scroll[column]=clamp(t.scroll[column],0,math.max(0,total-ch))
 		clip(colX,cy,colWidth,ch)
 		local sy=cy-t.scroll[column]
 		for _,s in ipairs(t.sections)do if sectionShown(s) and s.column==column then
 			if sy+s.height>=cy and sy<=cy+ch then
-				rect(colX,sy,colWidth,s.height,Theme.panel,8);rect(colX,sy,colWidth,s.height,Theme.border,8,false)
-				text(colX+14,sy+11,s.title,Theme.text,14);text(colX+colWidth-24,sy+11,s.collapsed and "+" or "-",Theme.muted)
-				if sy>=cy and sy+35<=cy+ch then hit(colX,sy,colWidth,35,function()s.collapsed=not s.collapsed;clearFocus()end,nil,w)end
+				rect(colX,sy,colWidth,s.height,Theme.panel,0);rect(colX,sy,colWidth,s.height,Theme.border,0,false);line(colX+1,sy,colWidth-2,Theme.accent)
+				text(colX+10,sy+6,s.title,Theme.text,12);text(colX+colWidth-19,sy+6,s.collapsed and "+"or "-",Theme.muted,11)
+				if sy>=cy and sy+23<=cy+ch then hit(colX,sy,colWidth,23,function()s.collapsed=not s.collapsed;clearFocus()end,nil,w)end
 				if not s.collapsed or needle~=""then
-					line(colX+12,sy+35,colWidth-24)
-					local ey=sy+39
+					line(colX+10,sy+23,colWidth-20)
+					local ey=sy+27
 					for _,c in ipairs(s.elements)do if matches(c,s)then ey=ey+renderControl(c,colX,ey,colWidth,cy,cy+ch)end end
 				end
 			end
-			sy=sy+s.height+14
+			sy=sy+s.height+10
 		end end
 		immediate.pop_clip()
 		table.insert(hits,firstHit,{x=colX,y=cy,w=colWidth,h=ch,owner=w,wheel=function(d)t.scroll[column]=clamp(t.scroll[column]-d*36,0,math.max(0,total-ch));popup=nil end})
