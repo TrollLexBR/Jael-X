@@ -48,7 +48,7 @@ local CFG = {
 	box2d = true, boxStyle = "Corners", tracers = false, tracerOrigin = "Bottom",
 	healthBars = true, healthText = false, showAllies = false, visualRange = 2000,
 	crosshair = false, targetLine = false, showStatus = true, thickness = 1,
-	filledChams = true, fpsCap = 60, rosterRate = 0.4,
+	filledChams = true, chamsMode = "Body bounds", rosterRate = 0.4,
 	fovColor = Color3.fromRGB(160, 110, 255),
 	fov = 160, smoothing = 6, maxDistance = 2000, opacity = 0.18,
 	enemyColor = Color3.fromRGB(255, 70, 90),
@@ -75,8 +75,8 @@ pcall(function()
 	local ok,raw=pcall(function()return buffer.tostring(fs.read_async(configFile))end)
 	if not ok then raw=buffer.tostring(fs.read_async("pf_assist_config.json")) end
 	local values=HTTP:JSONDecode(raw);values.smoothing=values.smoothing or values.smooth
-	local ranges={smoothing={0,100},fov={40,400},maxDistance={10,10000},visualRange={10,10000},opacity={0,1},nameSize={8,24},thickness={1,4},fpsCap={30,240},rosterRate={.2,2}}
-	local choices={targetMode={"Closest to crosshair","Closest to player","Lowest health"},targetPart={"Head","Torso"},boxStyle={"Corners","Full box"},tracerOrigin={"Top","Center","Bottom"}}
+	local ranges={smoothing={0,100},fov={40,400},maxDistance={10,10000},visualRange={10,10000},opacity={0,1},nameSize={8,24},thickness={1,4},rosterRate={.2,2}}
+	local choices={chamsMode={"Body bounds","Body parts"},targetMode={"Closest to crosshair","Closest to player","Lowest health"},targetPart={"Head","Torso"},boxStyle={"Corners","Full box"},tracerOrigin={"Top","Center","Bottom"}}
 	for key,value in pairs(values) do
 		if type(CFG[key])=="boolean" and type(value)=="boolean" then CFG[key]=value
 		elseif ranges[key] and type(value)=="number" and value==value then CFG[key]=math.clamp(value,ranges[key][1],ranges[key][2])
@@ -100,10 +100,23 @@ local function children(o)
 	local ok, result = pcall(function() return o:GetChildren() end)
 	return ok and result or {}
 end
+local frameSerial=0
+local shown=setmetatable({},{__mode="k"})
+local function show(d)
+	local previous=shown[d]
+	shown[d]=frameSerial
+	if not previous then d.Visible=true end
+end
+local function hide(d)
+	if shown[d] then d.Visible=false;shown[d]=nil end
+end
+local function finishDrawings()
+	for d,stamp in pairs(shown)do if stamp~=frameSerial then hide(d)end end
+end
 local function removeVisual(v)
-	for _, box in ipairs(v.boxes) do pcall(function() box:Remove() end) end
-	for _, d in ipairs(v.extra or {}) do pcall(function() d:Remove() end) end
-	if v.tag then pcall(function() v.tag:Remove() end) end
+	for _, box in ipairs(v.boxes) do pcall(function() hide(box);box:Remove() end) end
+	for _, d in ipairs(v.extra or {}) do pcall(function() hide(d);d:Remove() end) end
+	if v.tag then pcall(function() hide(v.tag);v.tag:Remove() end) end
 end
 function APP.stop()
 	if not APP.alive then return end
@@ -114,16 +127,16 @@ function APP.stop()
 	if ring then pcall(function() ring:Remove() end) end
 	if status then pcall(function() status:Remove() end) end
 	saveConfig()
-	for _, d in ipairs(UI.objects) do pcall(function() d:Remove() end) end
+	for _, d in ipairs(UI.objects) do pcall(function() hide(d);d:Remove() end) end
 	if APP.Library then pcall(function() APP.Library:Unload() end) end
 	if ENV.PF_ASSIST == APP then ENV.PF_ASSIST = nil end
 	print("[PF_ASSIST] unloaded.")
 end
 local function hideAll()
 	for _, v in pairs(APP.visuals) do
-		for _, b in ipairs(v.boxes) do b.Visible = false end
-		for _, d in ipairs(v.extra or {}) do d.Visible = false end
-		if v.tag then v.tag.Visible = false end
+		for _, b in ipairs(v.boxes) do hide(b) end
+		for _, d in ipairs(v.extra or {}) do hide(d) end
+		if v.tag then hide(v.tag) end
 	end
 end
 local function report(err)
@@ -175,7 +188,15 @@ local function resolve(model)
 			end
 		end
 	end
-	if e.head and e.label and #e.parts >= 5 and #e.parts <= 8 then return e end
+	if e.head and e.label and #e.parts >= 5 and #e.parts <= 8 then
+		e.sizes={}
+		for _,part in ipairs(e.parts)do
+			local size=read(part,"Size")
+			if not size or size.X<.05 or size.Y<.05 then size=part==e.head and Vector3.new(1.1,1.1,1.1)or part==e.torso and Vector3.new(2,2,1)or Vector3.new(.85,1.8,.85)end
+			e.sizes[part]=size
+		end
+		return e
+	end
 end
 local characterFolder
 local function locateCharacters()
@@ -241,12 +262,6 @@ local function visual(e)
 	APP.visuals[e.key] = v
 	v.tag = Drawing.new("Text")
 	v.tag.Size, v.tag.Center, v.tag.Outline = CFG.nameSize, true, CFG.nameOutline
-	for _ = 1, #e.parts do
-		local box = Drawing3D.new("Box")
-		v.boxes[#v.boxes + 1] = box
-		box.Filled = true
-		box.Thickness = 1
-	end
 	return v
 end
 
@@ -280,6 +295,13 @@ local function health(e)
 	end
 	if scale<0 or scale>1 then return nil end
 	return scale
+end
+local function metadata(e,now)
+	if not e.teamAt or now-e.teamAt>=.25 then e.enemy=classify(e);e.teamAt=now end
+	if not e.healthAt or now-e.healthAt>=.12 then
+		e.hp=health(e);e.parent=read(e.model,"Parent");e.healthAt=now
+	end
+	return e.enemy,e.hp,e.parent~=nil
 end
 local function activation()
 	local key = CFG.aimKey
@@ -530,7 +552,10 @@ local function visibilityColor(state, selected)
 end
 
 local function drawLine(d,a,b,color)
-	d.From,d.To,d.Color,d.Thickness,d.Visible = a,b,color,CFG.thickness,true
+	d.From,d.To = a,b
+	if d.Color~=color then d.Color=color end
+	if d.Thickness~=CFG.thickness then d.Thickness=CFG.thickness end
+	show(d)
 end
 local function renderEntity(state, selected, view)
 	local e, position, distance = state.e,state.position,state.distance
@@ -555,25 +580,30 @@ local function renderEntity(state, selected, view)
 		end
 		if CFG.nametags or CFG.nameDistance then
 			local name=CFG.nametags and (e.name or (state.enemy and "Enemy" or "Ally")) or ""
-			v.tag.Text=name..(CFG.nameDistance and string.format(" [%d studs]",math.floor(distance)) or "")
-			v.tag.Position,v.tag.Color,v.tag.Size,v.tag.Outline,v.tag.Visible=Vector2.new(top.X,y-CFG.nameSize-3),color,CFG.nameSize,CFG.nameOutline,true
+			local text=name..(CFG.nameDistance and string.format(" [%d studs]",math.floor(distance)) or "")
+			if v.tag.Text~=text then v.tag.Text=text end
+			v.tag.Position=Vector2.new(top.X,y-CFG.nameSize-3)
+			if v.tag.Color~=color then v.tag.Color=color end
+			if v.tag.Size~=CFG.nameSize then v.tag.Size=CFG.nameSize end
+			if v.tag.Outline~=CFG.nameOutline then v.tag.Outline=CFG.nameOutline end
+			show(v.tag)
 		end
 		if state.hp ~= nil then
 			if CFG.healthBars then
-				v.healthBg.Position,v.healthBg.Size,v.healthBg.Color,v.healthBg.Visible=Vector2.new(x-7,y),Vector2.new(4,height),Color3.fromRGB(20,20,20),true
-				v.healthFill.Position,v.healthFill.Size,v.healthFill.Color,v.healthFill.Visible=Vector2.new(x-6,y+height*(1-state.hp)),Vector2.new(2,height*state.hp),Color3.new(1-state.hp,state.hp,.15),true
+				v.healthBg.Position,v.healthBg.Size,v.healthBg.Color=Vector2.new(x-7,y),Vector2.new(4,height),Color3.fromRGB(20,20,20);show(v.healthBg)
+				v.healthFill.Position,v.healthFill.Size,v.healthFill.Color=Vector2.new(x-6,y+height*(1-state.hp)),Vector2.new(2,height*state.hp),Color3.new(1-state.hp,state.hp,.15);show(v.healthFill)
 			end
 			if CFG.healthText then
 				v.healthLabel.Text=string.format("%d%%",math.floor(state.hp*100+.5));v.healthLabel.Position=Vector2.new(top.X,y+height+3)
-				v.healthLabel.Color,v.healthLabel.Size,v.healthLabel.Visible=color,CFG.nameSize,true
+				v.healthLabel.Color,v.healthLabel.Size=color,CFG.nameSize;show(v.healthLabel)
 			end
 		elseif CFG.healthBars or CFG.healthText then
 			-- Unknown health stays visibly distinct instead of displaying a fake 100%.
 			if CFG.healthBars then
-				v.healthBg.Position,v.healthBg.Size,v.healthBg.Color,v.healthBg.Visible=Vector2.new(x-7,y),Vector2.new(4,height),Color3.fromRGB(95,100,110),true
+				v.healthBg.Position,v.healthBg.Size,v.healthBg.Color=Vector2.new(x-7,y),Vector2.new(4,height),Color3.fromRGB(95,100,110);show(v.healthBg)
 			end
 			v.healthLabel.Text="HP ?";v.healthLabel.Position=Vector2.new(top.X,y+height+3)
-			v.healthLabel.Size,v.healthLabel.Color,v.healthLabel.Visible=CFG.nameSize,Color3.fromRGB(180,185,195),true
+			v.healthLabel.Size,v.healthLabel.Color=CFG.nameSize,Color3.fromRGB(180,185,195);show(v.healthLabel)
 		end
 	end
 	if CFG.tracers then
@@ -581,30 +611,45 @@ local function renderEntity(state, selected, view)
 		drawLine(v.tracer,start,Vector2.new(state.screen.X,state.screen.Y),color)
 	end
 	if CFG.chams then
-		for i,part in ipairs(e.parts) do
-			local cf = read(part,"CFrame")
+		local function updateBox(index,cf,size)
+			local box=v.boxes[index]
+			if not box then box=Drawing3D.new("Box");v.boxes[index]=box end
+			box.CFrame=cf
+			if box.Size~=size then box.Size=size end
+			if box.Color~=color then box.Color=color end
+			if box.Filled~=CFG.filledChams then box.Filled=CFG.filledChams end
+			if box.Transparency~=CFG.opacity then box.Transparency=CFG.opacity end
+			if box.Thickness~=CFG.thickness then box.Thickness=CFG.thickness end
+			show(box)
+		end
+		if CFG.chamsMode=="Body bounds" then
+			-- One body volume avoids six pose reads and six box submissions per frame.
+			local cf=read(e.torso or e.head,"CFrame")
 			if cf then
-				local box=v.boxes[i];local size=read(part,"Size")
-				if not size or size.X<.05 or size.Y<.05 then size=part==e.head and Vector3.new(1.1,1.1,1.1) or part==e.torso and Vector3.new(2,2,1) or Vector3.new(.85,1.8,.85) end
-				box.CFrame,box.Size,box.Color,box.Filled,box.Transparency,box.Thickness,box.Visible=cf,size,color,CFG.filledChams,CFG.opacity,CFG.thickness,true
+				if not e.torso then cf=cf*CFrame.new(0,-2,0)end
+				updateBox(1,cf,Vector3.new(3.7,5.5,1.5))
+			end
+		else
+			for i,part in ipairs(e.parts)do
+				local cf=read(part,"CFrame")
+				if cf then updateBox(i,cf,e.sizes[part])end
 			end
 		end
 	end
 end
 local targetLine=Drawing.new("Line");local cross={Drawing.new("Line"),Drawing.new("Line")}
 UI.objects={targetLine,cross[1],cross[2]}
-local lastFrame=0
+local lastFrame,lastStatus=0,0
 local function frame(dt)
-	local now=os.clock();local cap=CFG.lightweight and math.min(60,CFG.fpsCap)or CFG.fpsCap
-	if now-lastFrame<1/cap then return end
+	local now=os.clock();frameSerial=frameSerial+1
 	dt=math.min(.05,now-lastFrame);lastFrame=now
-	hideAll();targetLine.Visible=false;for _,d in ipairs(cross) do d.Visible=false end
+	-- Each retained primitive is hidden only when it stops being used.
 	APP.menuOpen=APP.Library and APP.Library.Visible and APP.window and APP.window.visible or false
 	APP.stats.enemies,APP.stats.allies,APP.stats.unknown,APP.stats.target=0,0,0,nil
 	APP.stats.healthKnown,APP.stats.healthUnknown=0,0
 	APP.stats.visibleEnemies,APP.stats.blockedEnemies,APP.stats.visibilityUnknown=0,0,0
 	local camera=workspace.CurrentCamera;local cf=read(camera,"CFrame");local view=Drawing3D.GetViewportSize()
-	if not cf or view.X<1 or view.Y<1 then ring.Visible=false;return end
+	if not cf or view.X<1 or view.Y<1 then hideAll();hide(targetLine);for _,d in ipairs(cross)do hide(d)end;ring.Visible=false;return end
 	local center=Vector2.new(view.X/2,view.Y/2)
 	ring.Position,ring.Radius,ring.Color,ring.Visible=center,CFG.fov,CFG.fovColor,CFG.showFov and CFG.aim
 	if CFG.crosshair then drawLine(cross[1],center-Vector2.new(5,0),center+Vector2.new(5,0),CFG.fovColor);drawLine(cross[2],center-Vector2.new(0,5),center+Vector2.new(0,5),CFG.fovColor) end
@@ -613,11 +658,11 @@ local function frame(dt)
 	local held=activation();if not held then APP.lock=nil end
 	for _,e in ipairs(roster) do
 		local ok,err=pcall(function()
-			local enemy=classify(e);if enemy==nil then APP.stats.unknown=APP.stats.unknown+1;return end
+			local enemy,hp,present=metadata(e,now);if enemy==nil then APP.stats.unknown=APP.stats.unknown+1;return end
 			if enemy then APP.stats.enemies=APP.stats.enemies+1 else APP.stats.allies=APP.stats.allies+1 end
-			local hp=health(e)
 			if hp==nil then APP.stats.healthUnknown=APP.stats.healthUnknown+1 else APP.stats.healthKnown=APP.stats.healthKnown+1 end
-			if not alive(e,hp) then return end
+			if not present or hp~=nil and hp<=0 then return end
+			if not enemy and CFG.teamCheck and not CFG.showAllies then return end
 			local head=read(e.head,"Position");if not head then return end
 			local distance=(head-cf.Position).Magnitude;if distance<4 then return end
 			local screen,on=Drawing3D.WorldToViewportPoint(head);if not on or screen.Z<=0 then return end
@@ -645,7 +690,9 @@ local function frame(dt)
 			if distance<=CFG.visualRange and (enemy or CFG.showAllies) then states[#states+1]=state end
 			if CFG.teamCheck and not enemy or distance>CFG.maxDistance then return end
 			if not aimPosition or not canAimAt(aimClear) then return end
-			local aimScreen,visible=Drawing3D.WorldToViewportPoint(aimPosition);if not visible then return end
+			local aimScreen,visible=screen,true
+			if CFG.targetPart=="Torso"then aimScreen,visible=Drawing3D.WorldToViewportPoint(aimPosition)end
+			if not visible then return end
 			local delta=(Vector2.new(aimScreen.X,aimScreen.Y)-center).Magnitude;if delta>CFG.fov then return end
 			local priority=delta
 			if CFG.targetMode=="Closest to player" then priority=distance elseif CFG.targetMode=="Lowest health" then priority=state.hp end
@@ -672,8 +719,13 @@ local function frame(dt)
 		if math.abs(dx)>1e-6 or math.abs(dy)>1e-6 then local ok,err=pcall(input.mouse_move_relative,Vector2.new(dx,dy));if not ok then reason="Input error";report(err) else APP.stats.mouseCalls=(APP.stats.mouseCalls or 0)+1 end end
 	end
 	APP.stats.aimReason,APP.stats.frames,APP.stats.drawn=reason,(APP.stats.frames or 0)+1,#states
-	status.Text=string.format("PF JoX | %s | Enemies %d | Drawn %d | %s",reason,APP.stats.enemies,#states,APP.stats.target or "No target")
+	if now-lastStatus>=.15 then
+		lastStatus=now
+		local text=string.format("PF JoX | %s | Enemies %d | Drawn %d | %s",reason,APP.stats.enemies,#states,APP.stats.target or "No target")
+		if status.Text~=text then status.Text=text end
+	end
 	status.Visible=CFG.showStatus
+	finishDrawings()
 end
 --=========================== CORE START ==========================--
 if read(game,"PlaceId")~=292439477 then warn("[PF_ASSIST] This adapter requires Phantom Forces (292439477).");APP.stop();return end
@@ -763,6 +815,7 @@ local okUI,whyUI=pcall(function()
 	local detail=visuals:NewSection("Chams & tracers","right")
 	APP.chamsControl=toggle(detail,"chams","Body chams")
 	toggle(detail,"filledChams","Filled chams")
+	dropdown(detail,"chamsMode","Chams detail",{"Body bounds","Body parts"})
 	toggle(detail,"visibilityColors","Separate visible / blocked ESP colors")
 	slider(detail,"opacity","Chams opacity",0,1,.01)
 	toggle(detail,"tracers","Player tracers")
@@ -789,10 +842,10 @@ local okUI,whyUI=pcall(function()
 	screen:AddLabel({text="Visibility counts",get=function()return string.format("Visible %d / Blocked %d / Unknown %d",APP.stats.visibleEnemies or 0,APP.stats.blockedEnemies or 0,APP.stats.visibilityUnknown or 0)end})
 	screen:AddParagraph({text="Map-only approximate raycast checks the selected head/torso point. Certified map snapshots remain usable during rebuilding (up to 5 seconds). Aim requires a recent point check; ESP retains confirmed colors briefly. Large maps use a static spatial grid until the map changes or you rebuild it. Initial or invalid geometry stays unknown. Terrain and exact mesh silhouettes are not supported by the external raycast."})
 	local performance=utility:NewSection("Performance","full")
-	toggle(performance,"lightweight","Lightweight updates (60 FPS / max 25 rays per second)")
-	slider(performance,"fpsCap","Overlay update limit",30,240,1)
+	toggle(performance,"lightweight","Lightweight ray updates (max 25 per second)")
+	performance:AddLabel({text="ESP follows the Jael X overlay refresh rate"})
 	slider(performance,"rosterRate","Roster refresh (seconds)",.2,2,.1)
-	performance:AddParagraph({text="The update limit cannot exceed the app's overlay rate. Positions are read in PreRender; the slower registry loop only discovers or removes character models."})
+	performance:AddParagraph({text="Rendering follows the app overlay rate with no script FPS cap. Body bounds uses one chams volume; Body parts preserves individual limbs. The slower registry loop only discovers or removes character models."})
 	performance:AddButton({text="Rebuild visibility cache",callback=function()
 		local root=workspace:FindFirstChild("Map");assert(root,"Map unavailable");root=root:FindFirstChild("MapParts")or root
 		prepareRayCache(root,true);Library:Notify("Map cache","Rebuilding map scan; aim waits until complete")
