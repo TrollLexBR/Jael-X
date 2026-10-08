@@ -10,7 +10,7 @@ local HTTP = game:GetService("HttpService")
 assert(immediate and immediate.push_clip and font, "JoX Library requires Jael X with clipping support")
 local previous=shared.JoXLibrary or shared.JaelDrawingUI
 if previous and previous.Unload then pcall(function() previous:Unload() end) end
-local Library = { Version = "1.1.3", Windows = {}, Connections = {}, Alive = true, Visible = true, ToggleKey = "RightControl",
+local Library = { Version = "1.1.4", Windows = {}, Connections = {}, Alive = true, Visible = true, ToggleKey = "RightControl",
 	Rounding = 2, Notifications = true, NotificationDuration = 4, NotificationPosition = "Bottom right" }
 shared.JaelDrawingUI = Library
 shared.JoXLibrary = Library
@@ -502,10 +502,7 @@ local function renderWindow(w)
 	immediate.pop_clip()
 	hit(nx,ny,nw,nh,nil,nil,w,function(d)w.tabScroll=clamp(w.tabScroll-d*64,0,math.max(0,navTotal-nw))end)
 	local t=w.active;if not t then return end
-	local cx,cy,cw,ch=x+16,y+94,width-32,height-120
-	text(cx+7,y+73,t.title,Theme.accent,12)
-	clip(cx+110,y+70,cw-117,18);text(cx+110,y+74,t.description,Theme.muted,11);immediate.pop_clip()
-	line(cx,y+88,cw,Theme.border)
+	local cx,cy,cw,ch=x+16,y+72,width-32,height-98
 	local needle=query:lower()
 	local function matches(c,s)
 		return c.visible and (needle=="" or (s.title.." "..c.title.." "..(c.tooltip or "")):lower():find(needle,1,true)~=nil)
@@ -748,6 +745,25 @@ Library.Connections[#Library.Connections+1]=RS.PreRender:Connect(function()
 			end end
 			Library._popupStart=#hits
 			renderPopup(view)
+			-- Resize feedback follows the pointer; no permanent grip decoration.
+			local resizing=drag and drag.resize
+			local overCorner=false
+			if not popup and not drag then
+				for i=#Library.Windows,1,-1 do local w=Library.Windows[i]
+					if w.visible and inside(mouse,w.x,w.y,w.width,w.minimized and 28 or w.height)then
+						overCorner=not w.minimized and inside(mouse,w.x+w.width-24,w.y+w.height-24,24,24);break
+					end
+				end
+			end
+			if resizing or overCorner then
+				local ax,ay=clamp(mouse.X+14,0,view.X-22),clamp(mouse.Y+14,0,view.Y-22)
+				local function arrow(color,thickness)
+					for n=0,14 do rect(ax+n,ay+n,thickness,thickness,color,0)end
+					rect(ax,ay,8,thickness,color,0);rect(ax,ay,thickness,8,color,0)
+					rect(ax+8,ay+14,8,thickness,color,0);rect(ax+14,ay+8,thickness,8,color,0)
+				end
+				arrow(Theme.background,4);arrow(Theme.text,2)
+			end
 			local h=topHit(false)
 			if h and h.tip and not popup then
 				if not hover or hover.hit.tip~=h.tip then hover={hit=h,since=os.clock()} end

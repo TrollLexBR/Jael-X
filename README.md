@@ -159,3 +159,9 @@ The offline preview respects font ascender/baseline bearings instead of treating
 The window drop shadow and diagonal resize decoration are removed. Drag the invisible 24 × 24 bottom-right corner to resize; the window origin stays fixed and size is bounded by the available viewport. Dimensions still save in configs.
 
 `NewTab("Combat", "Aim and targeting")` creates one clickable Combat tab with a passive description, not a nested targeting page. Existing 1.x methods require no migration. Offline checks cover clicking horizontal tabs and dragging the corner.
+
+## Version 1.1.4 tab presentation and resize feedback
+
+Only the top-level tab row remains; the repeated page heading and description beneath it are removed. `NewTab(title, description, opts)` stays compatible: descriptions remain tooltip metadata, not nested tabs.
+
+The bottom-right corner draws a diagonal double-arrow beside the pointer while hovering or dragging. The current Jael X API has no native OS cursor setter, so this is Drawing feedback and does not replace the Windows arrow. It disappears outside the corner and while the menu is hidden. No permanent grip or shadow is added.
