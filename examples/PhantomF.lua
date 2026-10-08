@@ -18,12 +18,14 @@
 	These external volumes approximate R6 bodies. Map-only raycast checks are
 	approximate OBB visibility; unreadable/incomplete map scans block aim.
 	Camera.CFrame is read-only here: aim uses bounded relative mouse movement.
-	Requires Jael X 1.31.2 raycast APIs and fractional mouse movement. Menu starts closed.
+	Requires Jael X 1.31.5 Entity List and raycast APIs. Menu starts closed.
 	Status reports distance/FOV/input blockers; RightCtrl opens settings.
 	Name ESP reads ContentText: confirmed readable on Jael X 1.30 while Text
 	fails with "Unsupported string layout" for these PlayerTag labels.
 	Health follows visible PlayerTag.Health.Percent; hidden templates are not HP.
-	Gray bars marked HP ? mean the client has not exposed a usable health value.
+	Unknown health is omitted; no hidden template is presented as real HP.
+	ESP uses one Entity List and one fresh native pose batch per render frame.
+	Skeleton links measured head/torso/limb centers, not hidden engine joints.
 ]]
 
 --=========================== LIFECYCLE ==========================--
@@ -38,6 +40,22 @@ local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local RS = game:GetService("RunService")
 local CFG = {
+	esp = true, skeleton = false,
+	chamsStyle = "Silhouette", chamsOutline = true,
+	chamsOutlineColor = Color3.new(1, 1, 1), chamsOutlineOpacity = 1, chamsThickness = 1.5,
+	boxOpacity = 1, boxThickness = 1.5, boxBorder = true, boxBorderColor = Color3.new(0, 0, 0),
+	boxBorderOpacity = 1, boxBorderThickness = 1, boxFilled = false,
+	boxFillColor = Color3.new(0, 0, 0), boxFillOpacity = .15,
+	boxCornerLength = .25, boxDashLength = 8, boxGapLength = 5,
+	skeletonOpacity = 1, skeletonThickness = 1.5, skeletonBorder = true,
+	skeletonBorderColor = Color3.new(0, 0, 0), skeletonBorderOpacity = .8, skeletonBorderThickness = 1,
+	tracerOpacity = 1, tracerThickness = 1, tracerTarget = "Center", tracerBorder = false,
+	tracerBorderColor = Color3.new(0, 0, 0), tracerBorderOpacity = 1, tracerBorderThickness = 1,
+	nameOpacity = 1, nameFont = "Segoe UI", nameOffset = 3,
+	healthColor = Color3.fromRGB(80, 235, 135), healthOpacity = 1,
+	healthBackgroundColor = Color3.fromRGB(20, 20, 20), healthBackgroundOpacity = .7,
+	healthThickness = 3, healthOffset = 4, healthSide = "Left",
+
 	aim = true, chams = true, nametags = true, teamCheck = true, showFov = true,
 	wallCheck = true, visibilityColors = true, lightweight = true,
 	visibleColor = Color3.fromRGB(80, 235, 135),
@@ -48,14 +66,58 @@ local CFG = {
 	box2d = true, boxStyle = "Corners", tracers = false, tracerOrigin = "Bottom",
 	healthBars = true, healthText = false, showAllies = false, visualRange = 2000,
 	crosshair = false, targetLine = false, showStatus = true, thickness = 1,
-	filledChams = true, chamsMode = "Body bounds", rosterRate = 0.4,
+	filledChams = true, rosterRate = 0.4,
 	fovColor = Color3.fromRGB(160, 110, 255),
 	fov = 160, smoothing = 6, maxDistance = 2000, opacity = 0.18,
 	enemyColor = Color3.fromRGB(255, 70, 90),
 	targetColor = Color3.fromRGB(255, 200, 65),
 	allyColor = Color3.fromRGB(30, 230, 200),
 }
+for _, kind in ipairs({"chams", "box", "skeleton", "tracer", "name"}) do
+	CFG[kind .. "UseEntityColor"] = true
+	CFG[kind .. "Color"] = Color3.new(1, 1, 1)
+end
+local ranges = {
+	smoothing={0,100}, fov={40,400}, maxDistance={10,10000}, visualRange={10,10000},
+	opacity={0,1}, nameSize={6,64}, thickness={.1,8}, rosterRate={.2,2},
+	chamsOutlineOpacity={0,1}, chamsThickness={.1,8}, boxOpacity={0,1}, boxThickness={.1,8},
+	boxBorderOpacity={0,1}, boxBorderThickness={.1,8}, boxFillOpacity={0,1},
+	boxCornerLength={.05,.5}, boxDashLength={1,40}, boxGapLength={1,40},
+	skeletonOpacity={0,1}, skeletonThickness={.1,8}, skeletonBorderOpacity={0,1}, skeletonBorderThickness={.1,8},
+	tracerOpacity={0,1}, tracerThickness={.1,8}, tracerBorderOpacity={0,1}, tracerBorderThickness={.1,8},
+	nameOpacity={0,1}, nameOffset={0,30}, healthOpacity={0,1}, healthBackgroundOpacity={0,1},
+	healthThickness={.1,12}, healthOffset={0,30},
+}
+local choices = {
+	chamsStyle={"Silhouette","Wireframe","Volumes"}, boxStyle={"Corners","Full box","Dashed","3D"},
+	tracerOrigin={"Top","Center","Bottom","Mouse"}, tracerTarget={"Top","Center","Bottom"},
+	healthSide={"Left","Right","Bottom"}, nameFont={"Segoe UI","Arial","Consolas","Tahoma"},
+	targetMode={"Closest to crosshair","Closest to player","Lowest health"}, targetPart={"Head","Torso"},
+}
+local function normalizeSetting(key, value)
+	if type(CFG[key]) == "boolean" then assert(type(value)=="boolean", "Expected boolean");return value end
+	if ranges[key] then
+		assert(type(value)=="number" and value==value and math.abs(value)<math.huge, "Expected finite number")
+		return math.clamp(value, ranges[key][1], ranges[key][2])
+	end
+	if choices[key] then
+		for _, item in ipairs(choices[key]) do if value==item then return value end end
+		error("Unknown option: " .. tostring(value))
+	end
+	if key=="aimKey" then
+		assert(type(value)=="string" and (value=="None" or value:match("^MB[123]$") or Enum.KeyCode[value]), "Invalid key")
+		return value
+	end
+	if typeof(CFG[key])=="Color3" then
+		if typeof(value)=="Color3" then return value end
+		assert(type(value)=="table" and #value==3, "Expected RGB color")
+		for _, n in ipairs(value) do assert(type(n)=="number" and n==n and math.abs(n)<math.huge, "Invalid color") end
+		return Color3.fromRGB(math.clamp(value[1],0,255),math.clamp(value[2],0,255),math.clamp(value[3],0,255))
+	end
+	error("Unknown setting: " .. tostring(key))
+end
 APP.config = CFG
+APP.styleRevision = 1
 local roster, ring, status = {}, nil, nil
 local UI = { objects = {}, open = false, tab = "Aim", scroll = 0, x = 30, y = 65 }
 APP.menuOpen = false
@@ -74,17 +136,15 @@ end
 pcall(function()
 	local ok,raw=pcall(function()return buffer.tostring(fs.read_async(configFile))end)
 	if not ok then raw=buffer.tostring(fs.read_async("pf_assist_config.json")) end
-	local values=HTTP:JSONDecode(raw);values.smoothing=values.smoothing or values.smooth
-	local ranges={smoothing={0,100},fov={40,400},maxDistance={10,10000},visualRange={10,10000},opacity={0,1},nameSize={8,24},thickness={1,4},rosterRate={.2,2}}
-	local choices={chamsMode={"Body bounds","Body parts"},targetMode={"Closest to crosshair","Closest to player","Lowest health"},targetPart={"Head","Torso"},boxStyle={"Corners","Full box"},tracerOrigin={"Top","Center","Bottom"}}
-	for key,value in pairs(values) do
-		if type(CFG[key])=="boolean" and type(value)=="boolean" then CFG[key]=value
-		elseif ranges[key] and type(value)=="number" and value==value then CFG[key]=math.clamp(value,ranges[key][1],ranges[key][2])
-		elseif choices[key] then for _,choice in ipairs(choices[key])do if value==choice then CFG[key]=value end end
-		elseif key=="aimKey" and type(value)=="string" and (value:match("^MB[123]$") or Enum.KeyCode[value]) then CFG[key]=value
-		elseif typeof(CFG[key])=="Color3" and type(value)=="table" and #value==3 then
-			if type(value[1])=="number" and type(value[2])=="number" and type(value[3])=="number" then CFG[key]=Color3.fromRGB(math.clamp(value[1],0,255),math.clamp(value[2],0,255),math.clamp(value[3],0,255)) end
-		end
+	local values=HTTP:JSONDecode(raw)
+	values.smoothing=values.smoothing or values.smooth
+	-- Old per-script rate/body-bound options are intentionally retired. Keep existing visual flags.
+	for _, kind in ipairs({"chams", "box", "skeleton", "tracer"}) do
+		local key=kind .. "Thickness"
+		if values[key]==nil and values.thickness~=nil then values[key]=values.thickness end
+	end
+	for key, value in pairs(values) do
+		if CFG[key]~=nil then local valid, normalized=pcall(normalizeSetting,key,value);if valid then CFG[key]=normalized end end
 	end
 end)
 
@@ -114,9 +174,7 @@ local function finishDrawings()
 	for d,stamp in pairs(shown)do if stamp~=frameSerial then hide(d)end end
 end
 local function removeVisual(v)
-	for _, box in ipairs(v.boxes) do pcall(function() hide(box);box:Remove() end) end
-	for _, d in ipairs(v.extra or {}) do pcall(function() hide(d);d:Remove() end) end
-	if v.tag then pcall(function() hide(v.tag);v.tag:Remove() end) end
+	if v.entry then v.entry:Remove() end
 end
 function APP.stop()
 	if not APP.alive then return end
@@ -124,6 +182,7 @@ function APP.stop()
 	for _, c in ipairs(APP.connections) do pcall(function() c:Disconnect() end) end
 	for _, v in pairs(APP.visuals) do removeVisual(v) end
 	APP.visuals = {}
+	if APP.entityList then APP.entityList:Destroy() end
 	if ring then pcall(function() ring:Remove() end) end
 	if status then pcall(function() status:Remove() end) end
 	saveConfig()
@@ -133,11 +192,7 @@ function APP.stop()
 	print("[PF_ASSIST] unloaded.")
 end
 local function hideAll()
-	for _, v in pairs(APP.visuals) do
-		for _, b in ipairs(v.boxes) do hide(b) end
-		for _, d in ipairs(v.extra or {}) do hide(d) end
-		if v.tag then hide(v.tag) end
-	end
+	for _, v in pairs(APP.visuals) do v.draw=false;v.entity.poses={};v.entity.poseNames={} end
 end
 local function report(err)
 	APP.stats.lastError = tostring(err)
@@ -216,6 +271,7 @@ local function locateCharacters()
 		end
 	end
 end
+local attachEntity
 local function refreshRoster()
 	local folder = locateCharacters()
 	local nextRoster, seen = {}, {}
@@ -231,6 +287,7 @@ local function refreshRoster()
 					e.key = key
 					e.name = readPlayerName(e.label) or e.name
 					refreshHealth(e)
+					if attachEntity then attachEntity(e) end
 					seen[key] = true
 					nextRoster[#nextRoster + 1] = e
 				end
@@ -254,32 +311,6 @@ end
 local function alive(e, hp)
 	if not read(e.model, "Parent") then return false end
 	return hp == nil or hp > 0
-end
-local function visual(e)
-	local v = APP.visuals[e.key]
-	if v then v.entity=e;return v end
-	v = { entity = e, boxes = {} }
-	APP.visuals[e.key] = v
-	v.tag = Drawing.new("Text")
-	v.tag.Size, v.tag.Center, v.tag.Outline = CFG.nameSize, true, CFG.nameOutline
-	return v
-end
-
---=========================== EXTENDED DRAWING ==========================--
-local function drawable(v, kind)
-	local d = Drawing.new(kind);v.extra = v.extra or {};v.extra[#v.extra + 1] = d
-	return d
-end
-local function extended(e)
-	local v = visual(e)
-	if not v.lines then
-		v.lines = {};for i = 1, 8 do v.lines[i] = drawable(v, "Line") end
-		v.tracer = drawable(v,"Line")
-		v.healthBg = drawable(v,"Square");v.healthBg.Filled = true
-		v.healthFill = drawable(v,"Square");v.healthFill.Filled = true
-		v.healthLabel = drawable(v,"Text");v.healthLabel.Center = true;v.healthLabel.Outline = true
-	end
-	return v
 end
 local function health(e)
 	-- A hidden enemy tag can keep the template's full width. It is not verified HP.
@@ -583,85 +614,88 @@ local function drawLine(d,a,b,color)
 	if d.Thickness~=CFG.thickness then d.Thickness=CFG.thickness end
 	show(d)
 end
-local function renderEntity(state, selected, view)
-	local e, position, distance = state.e,state.position,state.distance
-	local color = visibilityColor(state,selected)
-	local v = extended(e)
-	local top, topOn = Drawing3D.WorldToViewportPoint(position+Vector3.new(0,1.2,0))
-	local bottom, bottomOn = Drawing3D.WorldToViewportPoint(position-Vector3.new(0,4.5,0))
-	-- These bounds approximate the measured R6 body; they are not mesh silhouettes.
-	local height = bottom.Y-top.Y
-	if top.Z>0 and bottom.Z>0 and height>1 then
-		local width = height*.55;local x,y = top.X-width/2,top.Y
-		if CFG.box2d then
-			local tl,tr,br,bl=Vector2.new(x,y),Vector2.new(x+width,y),Vector2.new(x+width,y+height),Vector2.new(x,y+height)
-			local segments
-			if CFG.boxStyle == "Full box" then segments={{tl,tr},{tr,br},{br,bl},{bl,tl}}
-			else
-				local a,b=width*.25,height*.2
-				segments={{tl,tl+Vector2.new(a,0)},{tl,tl+Vector2.new(0,b)},{tr,tr-Vector2.new(a,0)},{tr,tr+Vector2.new(0,b)},
-					{br,br-Vector2.new(a,0)},{br,br-Vector2.new(0,b)},{bl,bl+Vector2.new(a,0)},{bl,bl-Vector2.new(0,b)}}
-			end
-			for i,segment in ipairs(segments) do drawLine(v.lines[i],segment[1],segment[2],color) end
-		end
-		if CFG.nametags or CFG.nameDistance then
-			local name=CFG.nametags and (e.name or (state.enemy and "Enemy" or "Ally")) or ""
-			local text=name..(CFG.nameDistance and string.format(" [%d studs]",math.floor(distance)) or "")
-			if v.tag.Text~=text then v.tag.Text=text end
-			v.tag.Position=Vector2.new(top.X,y-CFG.nameSize-3)
-			if v.tag.Color~=color then v.tag.Color=color end
-			if v.tag.Size~=CFG.nameSize then v.tag.Size=CFG.nameSize end
-			if v.tag.Outline~=CFG.nameOutline then v.tag.Outline=CFG.nameOutline end
-			show(v.tag)
-		end
-		if state.hp ~= nil then
-			if CFG.healthBars then
-				v.healthBg.Position,v.healthBg.Size,v.healthBg.Color=Vector2.new(x-7,y),Vector2.new(4,height),Color3.fromRGB(20,20,20);show(v.healthBg)
-				v.healthFill.Position,v.healthFill.Size,v.healthFill.Color=Vector2.new(x-6,y+height*(1-state.hp)),Vector2.new(2,height*state.hp),Color3.new(1-state.hp,state.hp,.15);show(v.healthFill)
-			end
-			if CFG.healthText then
-				v.healthLabel.Text=string.format("%d%%",math.floor(state.hp*100+.5));v.healthLabel.Position=Vector2.new(top.X,y+height+3)
-				v.healthLabel.Color,v.healthLabel.Size=color,CFG.nameSize;show(v.healthLabel)
-			end
-		elseif CFG.healthBars or CFG.healthText then
-			-- Unknown health stays visibly distinct instead of displaying a fake 100%.
-			if CFG.healthBars then
-				v.healthBg.Position,v.healthBg.Size,v.healthBg.Color=Vector2.new(x-7,y),Vector2.new(4,height),Color3.fromRGB(95,100,110);show(v.healthBg)
-			end
-			v.healthLabel.Text="HP ?";v.healthLabel.Position=Vector2.new(top.X,y+height+3)
-			v.healthLabel.Size,v.healthLabel.Color=CFG.nameSize,Color3.fromRGB(180,185,195);show(v.healthLabel)
+--=========================== ENTITY LIST ESP ==========================--
+local function featureColor(kind, entity)
+	local v=entity.Options.Adapter
+	return CFG[kind .. "UseEntityColor"] and (v.color or CFG.unknownColor) or CFG[kind .. "Color"]
+end
+local colorCallbacks={}
+for _, kind in ipairs({"chams","box","skeleton","tracer","name"}) do
+	colorCallbacks[kind]=function(entity)return featureColor(kind,entity)end
+end
+local function configureFeatures(v)
+	local entry=v.entry
+	entry:AddChams({Enabled=CFG.chams,Style=CFG.chamsStyle,Color=colorCallbacks.chams,
+		Transparency=CFG.opacity,Filled=CFG.filledChams,Outline=CFG.chamsOutline,
+		OutlineColor=CFG.chamsOutlineColor,OutlineTransparency=CFG.chamsOutlineOpacity,Thickness=CFG.chamsThickness})
+	entry:AddBox({Enabled=CFG.box2d,Style=CFG.boxStyle=="Corners" and "Corner" or CFG.boxStyle=="Full box" and "Full" or CFG.boxStyle,
+		Color=colorCallbacks.box,Transparency=CFG.boxOpacity,Thickness=CFG.boxThickness,
+		Border=CFG.boxBorder,BorderColor=CFG.boxBorderColor,BorderTransparency=CFG.boxBorderOpacity,BorderThickness=CFG.boxBorderThickness,
+		Filled=CFG.boxFilled,FillColor=CFG.boxFillColor,FillTransparency=CFG.boxFillOpacity,
+		CornerLength=CFG.boxCornerLength,DashLength=CFG.boxDashLength,GapLength=CFG.boxGapLength})
+	entry:AddSkeleton({Enabled=CFG.skeleton,Color=colorCallbacks.skeleton,Transparency=CFG.skeletonOpacity,
+		Thickness=CFG.skeletonThickness,Border=CFG.skeletonBorder,BorderColor=CFG.skeletonBorderColor,
+		BorderTransparency=CFG.skeletonBorderOpacity,BorderThickness=CFG.skeletonBorderThickness,Connections=v.entity.links})
+	entry:AddTracer({Enabled=CFG.tracers,Origin=CFG.tracerOrigin,Target=CFG.tracerTarget,
+		Color=colorCallbacks.tracer,Transparency=CFG.tracerOpacity,Thickness=CFG.tracerThickness,
+		Border=CFG.tracerBorder,BorderColor=CFG.tracerBorderColor,BorderTransparency=CFG.tracerBorderOpacity,BorderThickness=CFG.tracerBorderThickness})
+	entry:AddNameTag({Enabled=CFG.nametags or CFG.nameDistance,Color=colorCallbacks.name,Transparency=CFG.nameOpacity,
+		Size=CFG.nameSize,Font=CFG.nameFont,Outline=CFG.nameOutline,Offset=CFG.nameOffset,ShowDistance=false})
+	entry:AddHealthBar({Enabled=CFG.healthBars,Color=CFG.healthColor,Transparency=CFG.healthOpacity,
+		BackgroundColor=CFG.healthBackgroundColor,BackgroundTransparency=CFG.healthBackgroundOpacity,
+		Thickness=CFG.healthThickness,Offset=CFG.healthOffset,Side=CFG.healthSide,ShowText=CFG.healthText})
+	v.styleRevision=APP.styleRevision
+end
+attachEntity=function(e)
+	local v=APP.visuals[e.key]
+	if v and v.entity==e then return v end
+	if v then removeVisual(v) end
+	if not APP.entityList or APP.entityList.Count>=128 then return nil end
+	e.poses={};e.poseNames={};e.partNames={};e.links={}
+	for i,part in ipairs(e.parts) do
+		local name=part==e.head and "Head" or part==e.torso and "Torso" or "Limb"..i
+		e.partNames[i]=name
+		-- PF names are obfuscated: link actual body centers, without pretending to read Motor6Ds.
+		if e.torso and part~=e.torso then e.links[#e.links+1]={"Torso",name} end
+	end
+	v={entity=e,draw=false}
+	local descriptor={Name=e.name or "Player",Parts=function()return v.draw and e.poses or {}end}
+	v.descriptor=descriptor
+	v.entry=APP.entityList:Add(descriptor,{Adapter=v})
+	APP.visuals[e.key]=v
+	configureFeatures(v)
+	return v
+end
+local function refreshPoses()
+	local requested,owners={},{}
+	for _,e in ipairs(roster) do
+		e.poses={};e.poseNames={}
+		for i,part in ipairs(e.partNames and e.parts or {}) do
+			if #requested<4096 then requested[#requested+1]=part;owners[#owners+1]={e,i} end
 		end
 	end
-	if CFG.tracers then
-		local start = CFG.tracerOrigin=="Center" and Vector2.new(view.X/2,view.Y/2) or CFG.tracerOrigin=="Top" and Vector2.new(view.X/2,0) or Vector2.new(view.X/2,view.Y)
-		drawLine(v.tracer,start,Vector2.new(state.screen.X,state.screen.Y),color)
-	end
-	if CFG.chams then
-		local function updateBox(index,cf,size)
-			local box=v.boxes[index]
-			if not box then box=Drawing3D.new("Box");v.boxes[index]=box end
-			box.CFrame=cf
-			if box.Size~=size then box.Size=size end
-			if box.Color~=color then box.Color=color end
-			if box.Filled~=CFG.filledChams then box.Filled=CFG.filledChams end
-			if box.Transparency~=CFG.opacity then box.Transparency=CFG.opacity end
-			if box.Thickness~=CFG.thickness then box.Thickness=CFG.thickness end
-			show(box)
-		end
-		if CFG.chamsMode=="Body bounds" then
-			-- One body volume avoids six pose reads and six box submissions per frame.
-			local cf=read(e.torso or e.head,"CFrame")
-			if cf then
-				if not e.torso then cf=cf*CFrame.new(0,-2,0)end
-				updateBox(1,cf,Vector3.new(3.7,5.5,1.5))
-			end
-		else
-			for i,part in ipairs(e.parts)do
-				local cf=read(part,"CFrame")
-				if cf then updateBox(i,cf,e.sizes[part])end
-			end
+	if #requested==0 then return end
+	local ok,snapshot=pcall(entities.get_parts_snapshot,requested)
+	if not ok then report(snapshot);return end
+	for i,owner in ipairs(owners) do
+		local pose=snapshot.parts[i]
+		if pose and typeof(pose.cframe)=="CFrame" then
+			local e,index=owner[1],owner[2]
+			local part={Name=e.partNames[index],CFrame=pose.cframe,Size=e.sizes[e.parts[index]]}
+			e.poses[#e.poses+1]=part;e.poseNames[part.Name]=part
 		end
 	end
+	APP.stats.poseParts=#requested
+end
+local function renderEntity(state, selected)
+	local e=state.e;local v=APP.visuals[e.key]
+	if not v then return end
+	v.draw=true;v.color=visibilityColor(state,selected)
+	if v.styleRevision~=APP.styleRevision then configureFeatures(v) end
+	v.descriptor.Name=(CFG.nametags and (e.name or (state.enemy and "Enemy" or "Ally")) or "")
+		..(CFG.nameDistance and string.format(" [%d studs]",math.floor(state.distance)) or "")
+	v.descriptor.Health=state.hp and state.hp*100 or nil
+	v.descriptor.MaxHealth=state.hp and 100 or nil
 end
 local targetLine=Drawing.new("Line");local cross={Drawing.new("Line"),Drawing.new("Line")}
 UI.objects={targetLine,cross[1],cross[2]}
@@ -679,6 +713,8 @@ local function frame(dt)
 	local center=Vector2.new(view.X/2,view.Y/2)
 	ring.Position,ring.Radius,ring.Color,ring.Visible=center,CFG.fov,CFG.fovColor,CFG.showFov and CFG.aim
 	if CFG.crosshair then drawLine(cross[1],center-Vector2.new(5,0),center+Vector2.new(5,0),CFG.fovColor);drawLine(cross[2],center-Vector2.new(0,5),center+Vector2.new(0,5),CFG.fovColor) end
+	for _,v in pairs(APP.visuals) do v.draw=false end
+	refreshPoses()
 	local best,score,states=nil,math.huge,{}
 	local requests,aimRequest,aimRequestScore={},nil,math.huge
 	local held=activation();if not held then APP.lock=nil end
@@ -689,10 +725,10 @@ local function frame(dt)
 			if hp==nil then APP.stats.healthUnknown=APP.stats.healthUnknown+1 else APP.stats.healthKnown=APP.stats.healthKnown+1 end
 			if not present or hp~=nil and hp<=0 then return end
 			if not enemy and CFG.teamCheck and not CFG.showAllies then return end
-			local head=read(e.head,"Position");if not head then return end
+			local headPose=e.poseNames.Head;local head=headPose and headPose.CFrame.Position;if not head then return end
 			local distance=(head-cf.Position).Magnitude;if distance<4 then return end
 			local screen,on=Drawing3D.WorldToViewportPoint(head);if not on or screen.Z<=0 then return end
-			local aimPosition=CFG.targetPart=="Torso" and read(e.torso,"Position") or head
+			local aimPose=e.poseNames[CFG.targetPart];local aimPosition=aimPose and aimPose.CFrame.Position
 			if distance>math.max(CFG.visualRange,CFG.maxDistance)then return end
 			local lineOfSight,aimClear
 			if aimPosition and (CFG.wallCheck or CFG.visibilityColors)and (enemy or not CFG.teamCheck)then
@@ -755,6 +791,9 @@ local function frame(dt)
 end
 --=========================== CORE START ==========================--
 if read(game,"PlaceId")~=292439477 then warn("[PF_ASSIST] This adapter requires Phantom Forces (292439477).");APP.stop();return end
+if type(entities)~="table" or type(entities.new)~="function" or type(entities.get_parts_snapshot)~="function" then
+	warn("[PF_ASSIST] Requires Jael X 1.31.5 Entity List. Update the app first.");APP.stop();return
+end
 ring=Drawing.new("Circle");ring.NumSides=64;ring.Thickness=1
 status=Drawing.new("Text");status.Position=Vector2.new(20,12);status.Size=14;status.Color=Color3.fromRGB(235,235,245);status.Outline=true
 APP.connections[#APP.connections+1]=UIS.InputBegan:Connect(function(event)
@@ -762,8 +801,14 @@ APP.connections[#APP.connections+1]=UIS.InputBegan:Connect(function(event)
 	local key=event.KeyCode.Name
 	if key=="F4" or key=="End" then APP.stop()
 	elseif key=="F2" then CFG.aim=not CFG.aim;if APP.aimControl then APP.aimControl:Set(CFG.aim,true) end
-	elseif key=="F3" then CFG.chams=not CFG.chams;if APP.chamsControl then APP.chamsControl:Set(CFG.chams,true) end end
+	elseif key=="F3" then CFG.chams=not CFG.chams;APP.styleRevision=APP.styleRevision+1;if APP.chamsControl then APP.chamsControl:Set(CFG.chams,true) end end
 end)
+APP.connections[#APP.connections+1]=RS.PreRender:Connect(function(dt)if running() then local ok,err=pcall(frame,dt);if not ok then hideAll();report(err) end end end)
+-- Register after the adapter callback: descriptor poses/styles belong to the current render frame.
+APP.entityList=entities.new({HideDead=true,Filter=function(entry)
+	local v=entry.Options.Adapter
+	return running() and CFG.esp and v.draw
+end})
 -- Visibility uses short batches with a time budget, independent of overlay FPS.
  task.spawn(function()
 	local cursor,nextPrune=0,0
@@ -781,7 +826,6 @@ end)
 	end
  end)
 task.spawn(function()while running() do local ok,err=pcall(refreshRoster);if not ok then roster={};report(err) end;task.wait(CFG.rosterRate) end end)
-APP.connections[#APP.connections+1]=RS.PreRender:Connect(function(dt)if running() then local ok,err=pcall(frame,dt);if not ok then hideAll();report(err) end end end)
 --=========================== JOX INTERFACE ==========================--
 local okUI,whyUI=pcall(function()
 	local ok,Library=pcall(function()
@@ -792,9 +836,16 @@ local okUI,whyUI=pcall(function()
 	end)
 	assert(ok and type(Library)=="table",tostring(Library))
 	APP.Library=Library
-	local w=Library:NewWindow({title="Phantom Forces",subtitle="JOX / EXTERNAL AIM & ESP",configId="PFJoX",width=900,height=640})
+	local w=Library:NewWindow({title="Phantom Forces",subtitle="JOX / ENTITY LIST ESP",configId="PFJoX",width=900,height=640,
+		configAliases={["pf/thickness"]="pf/chamsThickness"}})
 	APP.window=w;APP.controls={}
-	local function changed(key,value) CFG[key]=value;saveConfig() end
+	local function changed(key,value)
+		CFG[key]=normalizeSetting(key,value);APP.styleRevision=APP.styleRevision+1;saveConfig()
+	end
+	local function color(section,key,title)
+		local handle=section:AddColorPicker({text=title,flag="pf/"..key,default=CFG[key],callback=function(value)changed(key,value)end})
+		APP.controls[key]=handle;return handle
+	end
 	local function toggle(section,key,title)
 		local handle=section:AddToggle({text=title,flag="pf/"..key,default=CFG[key],callback=function(value)changed(key,value)end})
 		APP.controls[key]=handle;return handle
@@ -824,28 +875,96 @@ local okUI,whyUI=pcall(function()
 	toggle(behavior,"showFov","Show FOV")
 	toggle(behavior,"targetLine","Line to selected target")
 	behavior:AddParagraph({text="Close the menu before aiming. The selected Roblox window must be focused and Mouse & keyboard enabled. Jael X 1.30 preserves fractional mouse movements."})
-	local visuals=w:NewTab("ESP","Player information and overlays")
-	local players=visuals:NewSection("Player overlay","left")
-	toggle(players,"box2d","2D boxes")
-	dropdown(players,"boxStyle","Box style",{"Corners","Full box"})
-	toggle(players,"nametags","Player names")
-	toggle(players,"nameDistance","Distance labels")
-	toggle(players,"healthBars","Health bars")
-	toggle(players,"healthText","Health percentage")
+	local visuals=w:NewTab("ESP","Entity membership, range and visibility")
+	local players=visuals:NewSection("Entity List","left")
+	toggle(players,"esp","Enable ESP")
 	toggle(players,"showAllies","Show allies")
 	slider(players,"visualRange","ESP range (studs)",10,10000,10)
-	local detail=visuals:NewSection("Chams & tracers","right")
-	APP.chamsControl=toggle(detail,"chams","Body chams")
-	toggle(detail,"filledChams","Filled chams")
-	dropdown(detail,"chamsMode","Chams detail",{"Body bounds","Body parts"})
-	toggle(detail,"visibilityColors","Separate visible / blocked ESP colors")
-	slider(detail,"opacity","Chams opacity",0,1,.01)
-	toggle(detail,"tracers","Player tracers")
-	dropdown(detail,"tracerOrigin","Tracer origin",{"Bottom","Center","Top"})
-	slider(detail,"thickness","Line thickness",1,4,.5)
-	slider(detail,"nameSize","ESP text size",8,24,1)
-	toggle(detail,"nameOutline","Text outline")
-	detail:AddParagraph({text="2D bounds and chams approximate the R6 body. Health reads the visible game nametag, not server health. Hidden or unavailable health appears gray with HP ?. Lowest health skips unknown values."})
+	toggle(players,"visibilityColors","Visibility colors")
+	players:AddParagraph({text="Models are explicitly added to one Entity List. Roster changes retire old characters; poses are read in one fresh native batch each frame. ESP does not depend on Player.Character."})
+	local overview=visuals:NewSection("Features","right")
+	APP.chamsControl=toggle(overview,"chams","Body chams")
+	toggle(overview,"box2d","Boxes")
+	toggle(overview,"skeleton","Skeleton")
+	toggle(overview,"nametags","Player names")
+	toggle(overview,"nameDistance","Distance labels")
+	toggle(overview,"healthBars","Health bars")
+	toggle(overview,"tracers","Player tracers")
+	local chams=w:NewTab("Chams","Silhouette, wireframe and volume styles")
+	local fill=chams:NewSection("Fill","left")
+	dropdown(fill,"chamsStyle","Chams style",{"Silhouette","Wireframe","Volumes"})
+	toggle(fill,"filledChams","Filled chams")
+	slider(fill,"opacity","Chams opacity",0,1,.01)
+	toggle(fill,"chamsUseEntityColor","Use team / visibility color")
+	color(fill,"chamsColor","Custom fill color")
+	fill:AddParagraph({text="Silhouette unions all visible body volumes and applies opacity once. Wireframe draws part edges; Volumes preserves individual faces. Bodies remain approximations of R6 anatomy."})
+	local outline=chams:NewSection("Outline / wire","right")
+	toggle(outline,"chamsOutline","Show outline / wire")
+	color(outline,"chamsOutlineColor","Outline / wire color")
+	slider(outline,"chamsOutlineOpacity","Outline / wire opacity",0,1,.01)
+	slider(outline,"chamsThickness","Outline / wire thickness",.1,8,.1)
+	local boxes=w:NewTab("Boxes","Full, corner, dashed and 3D boxes")
+	local boxLines=boxes:NewSection("Lines","left")
+	dropdown(boxLines,"boxStyle","Box style",{"Corners","Full box","Dashed","3D"})
+	toggle(boxLines,"boxUseEntityColor","Use team / visibility color")
+	color(boxLines,"boxColor","Custom line color")
+	slider(boxLines,"boxOpacity","Line opacity",0,1,.01)
+	slider(boxLines,"boxThickness","Line thickness",.1,8,.1)
+	slider(boxLines,"boxCornerLength","Corner fraction",.05,.5,.01)
+	slider(boxLines,"boxDashLength","Dash length",1,40,1)
+	slider(boxLines,"boxGapLength","Dash gap",1,40,1)
+	local boxBorder=boxes:NewSection("Border & fill","right")
+	toggle(boxBorder,"boxBorder","Show border")
+	color(boxBorder,"boxBorderColor","Border color")
+	slider(boxBorder,"boxBorderOpacity","Border opacity",0,1,.01)
+	slider(boxBorder,"boxBorderThickness","Border thickness",.1,8,.1)
+	toggle(boxBorder,"boxFilled","Filled box")
+	color(boxBorder,"boxFillColor","Fill color")
+	slider(boxBorder,"boxFillOpacity","Fill opacity",0,1,.01)
+	local skeleton=w:NewTab("Skeleton","Head, torso and limb-center links")
+	local bones=skeleton:NewSection("Links","left")
+	toggle(bones,"skeletonUseEntityColor","Use team / visibility color")
+	color(bones,"skeletonColor","Custom skeleton color")
+	slider(bones,"skeletonOpacity","Skeleton opacity",0,1,.01)
+	slider(bones,"skeletonThickness","Skeleton thickness",.1,8,.1)
+	bones:AddParagraph({text="The PF adapter links the tagged head and discovered torso to other body-part centers. Missing poses skip their links. This is an approximate stick figure, not engine joint extraction."})
+	local boneBorder=skeleton:NewSection("Border","right")
+	toggle(boneBorder,"skeletonBorder","Show border")
+	color(boneBorder,"skeletonBorderColor","Border color")
+	slider(boneBorder,"skeletonBorderOpacity","Border opacity",0,1,.01)
+	slider(boneBorder,"skeletonBorderThickness","Border thickness",.1,8,.1)
+	local labels=w:NewTab("Labels & health","Names, distance and available health")
+	local names=labels:NewSection("Text","left")
+	toggle(names,"nameUseEntityColor","Use team / visibility color")
+	color(names,"nameColor","Custom text color")
+	slider(names,"nameOpacity","Text opacity",0,1,.01)
+	slider(names,"nameSize","Text size",6,64,1)
+	dropdown(names,"nameFont","Font",{"Segoe UI","Arial","Consolas","Tahoma"})
+	toggle(names,"nameOutline","Text outline")
+	slider(names,"nameOffset","Text offset",0,30,1)
+	local bars=labels:NewSection("Health","right")
+	dropdown(bars,"healthSide","Bar side",{"Left","Right","Bottom"})
+	color(bars,"healthColor","Health color")
+	slider(bars,"healthOpacity","Health opacity",0,1,.01)
+	color(bars,"healthBackgroundColor","Background color")
+	slider(bars,"healthBackgroundOpacity","Background opacity",0,1,.01)
+	slider(bars,"healthThickness","Bar thickness",.1,12,.1)
+	slider(bars,"healthOffset","Bar offset",0,30,1)
+	toggle(bars,"healthText","Health percentage")
+	bars:AddParagraph({text="Health reads a usable visible game nametag percentage, not server HP. Hidden, missing or invalid health is omitted. Lowest health excludes unknown values."})
+	local tracers=w:NewTab("Tracers","Origins, destinations and line styling")
+	local tracerLines=tracers:NewSection("Lines","left")
+	dropdown(tracerLines,"tracerOrigin","Origin",{"Bottom","Center","Top","Mouse"})
+	dropdown(tracerLines,"tracerTarget","Destination",{"Top","Center","Bottom"})
+	toggle(tracerLines,"tracerUseEntityColor","Use team / visibility color")
+	color(tracerLines,"tracerColor","Custom line color")
+	slider(tracerLines,"tracerOpacity","Line opacity",0,1,.01)
+	slider(tracerLines,"tracerThickness","Line thickness",.1,8,.1)
+	local tracerBorders=tracers:NewSection("Border","right")
+	toggle(tracerBorders,"tracerBorder","Show border")
+	color(tracerBorders,"tracerBorderColor","Border color")
+	slider(tracerBorders,"tracerBorderOpacity","Border opacity",0,1,.01)
+	slider(tracerBorders,"tracerBorderThickness","Border thickness",.1,8,.1)
 	local style=w:NewTab("Appearance","Colors and screen elements")
 	local colors=style:NewSection("Overlay colors","left")
 	for _,entry in ipairs({{"visibleColor","Visible enemy color"},{"blockedColor","Blocked enemy color"},{"unknownColor","Unknown visibility color"},{"enemyColor","Enemy color"},{"allyColor","Ally color"},{"targetColor","Target color"},{"fovColor","FOV / crosshair color"}})do
@@ -867,7 +986,7 @@ local okUI,whyUI=pcall(function()
 	toggle(performance,"lightweight","Lightweight visibility batches")
 	performance:AddLabel({text="ESP follows the Jael X overlay refresh rate"})
 	slider(performance,"rosterRate","Roster refresh (seconds)",.2,2,.1)
-	performance:AddParagraph({text="Rendering follows the app overlay rate with no script FPS cap. Body bounds uses one chams volume; Body parts preserves individual limbs. The slower registry loop only discovers or removes character models."})
+	performance:AddParagraph({text="Rendering follows the app overlay rate with no script FPS cap. One native pose batch feeds all Entity List features. Silhouette applies fill once per character. The registry loop only discovers or removes models."})
 	performance:AddButton({text="Rebuild visibility cache",callback=function()
 		local root=workspace:FindFirstChild("Map");assert(root,"Map unavailable");root=root:FindFirstChild("MapParts")or root
 		prepareRayCache(root,true);Library:Notify("Map cache","Rebuilding map scan; aim waits until complete")
