@@ -10,7 +10,7 @@ local HTTP = game:GetService("HttpService")
 assert(immediate and immediate.push_clip and font, "JoX Library requires Jael X with clipping support")
 local previous=shared.JoXLibrary or shared.JaelDrawingUI
 if previous and previous.Unload then pcall(function() previous:Unload() end) end
-local Library = { Version = "1.1.2", Windows = {}, Connections = {}, Alive = true, Visible = true, ToggleKey = "RightControl",
+local Library = { Version = "1.1.3", Windows = {}, Connections = {}, Alive = true, Visible = true, ToggleKey = "RightControl",
 	Rounding = 2, Notifications = true, NotificationDuration = 4, NotificationPosition = "Bottom right" }
 shared.JaelDrawingUI = Library
 shared.JoXLibrary = Library
@@ -469,7 +469,6 @@ end
 local function renderWindow(w)
 	local x,y,width,height=w.x,w.y,w.width,w.minimized and 28 or w.height
 	hit(x,y,width,height,function()clearFocus()end,nil,w,function()end)
-	rect(x+4,y+5,width,height,Color3.fromRGB(8,3,7),0)
 	rect(x,y,width,height,Theme.background,1);rect(x,y,width,height,Theme.border,1,false)
 	rect(x+3,y+3,width-6,height-6,Theme.accent,0,false)
 	clip(x+12,y+5,width-290,18);rowText(x+12,y+4,width-290,20,w.title,Theme.muted,12);immediate.pop_clip()
@@ -561,8 +560,8 @@ local function renderWindow(w)
 			end,"Drag to scroll",w)
 		end
 	end
-	hit(x+width-16,y+height-16,16,16,function()drag={window=w,resize=true,dx=mouse.X-width,dy=mouse.Y-height}end,"Resize window",w)
-	text(x+width-14,y+height-16,"/",Theme.muted)
+	-- A larger invisible grip keeps the clean border and avoids covering controls.
+	hit(x+width-24,y+height-24,24,24,function()drag={window=w,resize=true,dx=mouse.X-width,dy=mouse.Y-height}end,"Drag corner to resize",w)
 end
 local function rgbToHSV(rgb)
 	local r,g,b=rgb[1]/255,rgb[2]/255,rgb[3]/255
@@ -738,7 +737,7 @@ Library.Connections[#Library.Connections+1]=RS.PreRender:Connect(function()
 		hits={};mouse=UIS:GetMouseLocation();local view=Drawing3D.GetViewportSize()
 		if drag then
 			local w=drag.window
-			if drag.resize then w.width=clamp(mouse.X-drag.dx,650,math.max(650,view.X));w.height=clamp(mouse.Y-drag.dy,420,math.max(420,view.Y))
+			if drag.resize then w.width=clamp(mouse.X-drag.dx,650,math.max(650,view.X-w.x));w.height=clamp(mouse.Y-drag.dy,420,math.max(420,view.Y-w.y))
 			else w.x,w.y=mouse.X-drag.dx,mouse.Y-drag.dy end
 		end
 		if slider then if slider.update then slider.update() else slider.apply((mouse.X-slider.x)/slider.width)end end

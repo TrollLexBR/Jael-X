@@ -128,7 +128,7 @@ Use explicit stable flags to preserve settings when labels change. Pass `configA
 - Use `shared` for singleton handles in Jael X. Its external Lua VM does not provide executor-style `getgenv()`.
 - Input and Drawing share client pixels: do not subtract the Roblox GUI inset.
 - Wheel input requires `immediate.interactive_region`; the library registers visible windows and popup regions each frame.
-- Minimum window size is 650 × 420. Keep the window inside the viewport; resize using the lower right grip.
+- Minimum window size is 650 × 420. Keep the window inside the viewport; resize by dragging the invisible 24 × 24 lower right corner.
 - No touch/gamepad input emulation. Text editing uses key edges rather than OS text composition.
 - Callbacks are protected and scheduled. Keep feature loops cooperative with `task.wait`.
 - Keep the calling script alive with its normal core loop. The demo uses a guarded wait loop and an unload key; unloading the library disconnects its signals without stopping your own features.
@@ -153,3 +153,9 @@ The reference layout uses horizontal tabs, compact checkbox rows, thin magenta s
 Control captions, checkbox labels, slider values, dropdown values/arrows, buttons, keybinds, tabs and color editor fields share measured DirectWrite line-box alignment. Slider numbers are also centered horizontally using measured width rather than character-count estimates. Cached measurements are bounded to avoid retaining unlimited dynamic text.
 
 The offline preview respects font ascender/baseline bearings instead of treating visible glyph bounds as the layout origin. Regression checks compare the rendered text line centers to slider, dropdown and button rectangles using the native font measurement API. Public methods and saved configuration flags remain unchanged.
+
+## Version 1.1.3 clean window edges
+
+The window drop shadow and diagonal resize decoration are removed. Drag the invisible 24 × 24 bottom-right corner to resize; the window origin stays fixed and size is bounded by the available viewport. Dimensions still save in configs.
+
+`NewTab("Combat", "Aim and targeting")` creates one clickable Combat tab with a passive description, not a nested targeting page. Existing 1.x methods require no migration. Offline checks cover clicking horizontal tabs and dragging the corner.
