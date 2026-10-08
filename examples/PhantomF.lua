@@ -15,9 +15,10 @@
 	the head; its TextLabel.TextColor3 is red (255,10,20) for enemies and cyan
 	for allies. Never assume folder order or randomized object names.
 	The six direct body parts report Size=0.001; drawing uses R6-sized volumes.
-	These external volumes have no mesh silhouettes or depth/visibility test.
+	These external volumes approximate R6 bodies. Map-only raycast checks are
+	approximate OBB visibility; unreadable/incomplete map scans block aim.
 	Camera.CFrame is read-only here: aim uses bounded relative mouse movement.
-	Requires Jael X 1.30 for fractional mouse movement. Menu starts closed.
+	Requires Jael X 1.31.2 raycast APIs and fractional mouse movement. Menu starts closed.
 	Status reports distance/FOV/input blockers; RightCtrl opens settings.
 	Name ESP reads ContentText: confirmed readable on Jael X 1.30 while Text
 	fails with "Unsupported string layout" for these PlayerTag labels.
@@ -38,6 +39,10 @@ local UIS = game:GetService("UserInputService")
 local RS = game:GetService("RunService")
 local CFG = {
 	aim = true, chams = true, nametags = true, teamCheck = true, showFov = true,
+	wallCheck = true, visibilityColors = true,
+	visibleColor = Color3.fromRGB(80, 235, 135),
+	blockedColor = Color3.fromRGB(255, 70, 90),
+	unknownColor = Color3.fromRGB(150, 150, 160),
 	nameSize = 12, nameDistance = false, nameOutline = true,
 	targetMode = "Closest to crosshair", targetPart = "Head", aimKey = "MB2", sticky = false,
 	box2d = true, boxStyle = "Corners", tracers = false, tracerOrigin = "Bottom",
@@ -284,12 +289,47 @@ local function activation()
 	elseif key ~= "None" and Enum.KeyCode[key] then return UIS:IsKeyDown(Enum.KeyCode[key]) end
 	return false
 end
+--=========================== MAP VISIBILITY ==========================--
+local function pointVisibility(origin, destination)
+	if not raycast or type(raycast.visible)~="function" then
+		APP.stats.raycastState="Raycast API unavailable"
+		return nil
+	end
+	local root=workspace:FindFirstChild("Map")
+	if not root or not read(root,"Parent") then
+		APP.stats.raycastState="Waiting for Workspace.Map"
+		return nil
+	end
+	-- Never force refresh per target: the native scanner must finish its batch.
+	-- A map-only root excludes player bounds and viewmodels from wall checks.
+	local ok,clear,hit,scan=pcall(raycast.visible,root,origin,destination)
+	if not ok then APP.stats.raycastState="Raycast error";return nil end
+	if type(scan)~="table" or scan.Complete~=true or scan.Truncated==true
+		or (tonumber(scan.Skipped) or 0)>0 or type(clear)~="boolean" then
+		APP.stats.raycastState=scan and scan.Truncated and "Map scan truncated" or "Map scan incomplete / skipped geometry"
+		return nil
+	end
+	APP.stats.raycastState="Map raycast ready (approximate)"
+	return clear
+end
+local function canAimAt(lineOfSight)
+	return not CFG.wallCheck or lineOfSight==true
+end
+local function visibilityColor(state, selected)
+	if state.enemy and CFG.visibilityColors then
+		if state.lineOfSight==true then return selected and CFG.targetColor or CFG.visibleColor end
+		if state.lineOfSight==false then return CFG.blockedColor end
+		return CFG.unknownColor
+	end
+	return selected and CFG.targetColor or state.enemy and CFG.enemyColor or CFG.allyColor
+end
+
 local function drawLine(d,a,b,color)
 	d.From,d.To,d.Color,d.Thickness,d.Visible = a,b,color,CFG.thickness,true
 end
 local function renderEntity(state, selected, view)
 	local e, position, distance = state.e,state.position,state.distance
-	local color = selected and CFG.targetColor or state.enemy and CFG.enemyColor or CFG.allyColor
+	local color = visibilityColor(state,selected)
 	local v = extended(e)
 	local top, topOn = Drawing3D.WorldToViewportPoint(position+Vector3.new(0,1.2,0))
 	local bottom, bottomOn = Drawing3D.WorldToViewportPoint(position-Vector3.new(0,4.5,0))
@@ -356,6 +396,7 @@ local function frame(dt)
 	APP.menuOpen=APP.Library and APP.Library.Visible and APP.window and APP.window.visible or false
 	APP.stats.enemies,APP.stats.allies,APP.stats.unknown,APP.stats.target=0,0,0,nil
 	APP.stats.healthKnown,APP.stats.healthUnknown=0,0
+	APP.stats.visibleEnemies,APP.stats.blockedEnemies,APP.stats.visibilityUnknown=0,0,0
 	local camera=workspace.CurrentCamera;local cf=read(camera,"CFrame");local view=Drawing3D.GetViewportSize()
 	if not cf or view.X<1 or view.Y<1 then ring.Visible=false;return end
 	local center=Vector2.new(view.X/2,view.Y/2)
@@ -373,11 +414,18 @@ local function frame(dt)
 			local head=read(e.head,"Position");if not head then return end
 			local distance=(head-cf.Position).Magnitude;if distance<4 then return end
 			local screen,on=Drawing3D.WorldToViewportPoint(head);if not on or screen.Z<=0 then return end
-			local state={e=e,enemy=enemy,position=head,distance=distance,screen=screen,hp=hp}
+			local aimPosition=CFG.targetPart=="Torso" and read(e.torso,"Position") or head
+			local lineOfSight
+			if aimPosition and (CFG.wallCheck or CFG.visibilityColors) then lineOfSight=pointVisibility(cf.Position,aimPosition)end
+			if enemy then
+				if lineOfSight==true then APP.stats.visibleEnemies=APP.stats.visibleEnemies+1
+				elseif lineOfSight==false then APP.stats.blockedEnemies=APP.stats.blockedEnemies+1
+				else APP.stats.visibilityUnknown=APP.stats.visibilityUnknown+1 end
+			end
+			local state={e=e,enemy=enemy,position=head,distance=distance,screen=screen,hp=hp,lineOfSight=lineOfSight}
 			if distance<=CFG.visualRange and (enemy or CFG.showAllies) then states[#states+1]=state end
 			if CFG.teamCheck and not enemy or distance>CFG.maxDistance then return end
-			local aimPosition=CFG.targetPart=="Torso" and read(e.torso,"Position") or head
-			if not aimPosition then return end
+			if not aimPosition or not canAimAt(lineOfSight) then return end
 			local aimScreen,visible=Drawing3D.WorldToViewportPoint(aimPosition);if not visible then return end
 			local delta=(Vector2.new(aimScreen.X,aimScreen.Y)-center).Magnitude;if delta>CFG.fov then return end
 			local priority=delta
@@ -390,7 +438,8 @@ local function frame(dt)
 	end
 	for _,state in ipairs(states) do local ok,err=pcall(renderEntity,state,best and best.e.key==state.e.key,view);if not ok then report(err) end end
 	local enabled=true;if input.get_status then local ok,info=pcall(input.get_status);if ok then enabled=info.enabled end end
-	local reason=not CFG.aim and "Disabled" or APP.menuOpen and "Menu open" or not input.is_window_focused() and "Game unfocused" or not enabled and "Input disabled" or not held and "Hold aim key" or not best and "No target in FOV / range" or "Tracking"
+	local reason=not CFG.aim and "Disabled" or APP.menuOpen and "Menu open" or not input.is_window_focused() and "Game unfocused" or not enabled and "Input disabled" or not held and "Hold aim key" or not best and (CFG.wallCheck and "No visible target / FOV / range" or "No target in FOV / range") or "Tracking"
+	if not best then APP.lock=nil end
 	if best then
 		APP.stats.target=best.e.name or "Enemy"
 		if CFG.targetLine then drawLine(targetLine,center,Vector2.new(best.point.X,best.point.Y),CFG.targetColor) end
@@ -450,6 +499,7 @@ local okUI,whyUI=pcall(function()
 	dropdown(targeting,"targetMode","Target priority",{"Closest to crosshair","Closest to player","Lowest health"})
 	dropdown(targeting,"targetPart","Target part",{"Head","Torso"})
 	toggle(targeting,"teamCheck","Aim team check")
+	toggle(targeting,"wallCheck","Aim visibility check (raycast)")
 	toggle(targeting,"sticky","Keep selected target while holding")
 	slider(targeting,"maxDistance","Aim range (studs)",10,10000,10)
 	targeting:AddParagraph({text="Lowest health uses the replicated health-bar percentage. Unknown health is excluded. Targeting remains inside the FOV and selected range."})
@@ -473,6 +523,7 @@ local okUI,whyUI=pcall(function()
 	local detail=visuals:NewSection("Chams & tracers","right")
 	APP.chamsControl=toggle(detail,"chams","Body chams")
 	toggle(detail,"filledChams","Filled chams")
+	toggle(detail,"visibilityColors","Separate visible / blocked ESP colors")
 	slider(detail,"opacity","Chams opacity",0,1,.01)
 	toggle(detail,"tracers","Player tracers")
 	dropdown(detail,"tracerOrigin","Tracer origin",{"Bottom","Center","Top"})
@@ -482,7 +533,7 @@ local okUI,whyUI=pcall(function()
 	detail:AddParagraph({text="2D bounds and chams approximate the R6 body. Health reads the visible game nametag, not server health. Hidden or unavailable health appears gray with HP ?. Lowest health skips unknown values."})
 	local style=w:NewTab("Appearance","Colors and screen elements")
 	local colors=style:NewSection("Overlay colors","left")
-	for _,entry in ipairs({{"enemyColor","Enemy color"},{"allyColor","Ally color"},{"targetColor","Target color"},{"fovColor","FOV / crosshair color"}})do
+	for _,entry in ipairs({{"visibleColor","Visible enemy color"},{"blockedColor","Blocked enemy color"},{"unknownColor","Unknown visibility color"},{"enemyColor","Enemy color"},{"allyColor","Ally color"},{"targetColor","Target color"},{"fovColor","FOV / crosshair color"}})do
 		local key,title=entry[1],entry[2]
 		colors:AddColorPicker({text=title,flag="pf/"..key,default=CFG[key],callback=function(value)changed(key,value)end})
 	end
@@ -493,6 +544,9 @@ local okUI,whyUI=pcall(function()
 	screen:AddLabel({text="Entities",get=function()return string.format("Enemies %d / allies %d / drawn %d",APP.stats.enemies or 0,APP.stats.allies or 0,APP.stats.drawn or 0)end})
 	screen:AddLabel({text="Last error",get=function()return APP.stats.lastError or "No errors" end})
 	local utility=w:NewTab("Runtime","Performance, profiles and lifecycle")
+	screen:AddLabel({text="Raycast state",get=function()return APP.stats.raycastState or "Waiting for scan"end})
+	screen:AddLabel({text="Visibility counts",get=function()return string.format("Visible %d / Blocked %d / Unknown %d",APP.stats.visibleEnemies or 0,APP.stats.blockedEnemies or 0,APP.stats.visibilityUnknown or 0)end})
+	screen:AddParagraph({text="Map-only approximate raycast checks the selected head/torso point. Unknown, incomplete or skipped geometry blocks aim when visibility check is enabled. ESP keeps unknown visibility gray. Terrain and exact mesh silhouettes are not supported by the external raycast."})
 	local performance=utility:NewSection("Performance","full")
 	slider(performance,"fpsCap","Overlay update limit",30,240,1)
 	slider(performance,"rosterRate","Roster refresh (seconds)",.2,2,.1)

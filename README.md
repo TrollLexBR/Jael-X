@@ -165,3 +165,9 @@ The window drop shadow and diagonal resize decoration are removed. Drag the invi
 Only the top-level tab row remains; the repeated page heading and description beneath it are removed. `NewTab(title, description, opts)` stays compatible: descriptions remain tooltip metadata, not nested tabs.
 
 The bottom-right corner draws a diagonal double-arrow beside the pointer while hovering or dragging. The current Jael X API has no native OS cursor setter, so this is Drawing feedback and does not replace the Windows arrow. It disappears outside the corner and while the menu is hidden. No permanent grip or shadow is added.
+
+## Phantom Forces example: visibility check
+
+`examples/PhantomF.lua` now requires Jael X 1.31.2 for its default map-only visibility check. Aim accepts only confirmed clear Head/Torso points. The ESP has independently configurable visible, blocked and unknown colors (green/red/gray by default). Aim visibility and ESP colors have separate toggles. Existing team, range, health and config behavior is retained.
+
+Raycasts use approximate external bounding boxes, not engine depth or exact mesh/Terrain geometry. Incomplete, truncated or skipped scans block aim until visibility is known; status appears in Appearance. Offline visibility tests pass; live gameplay needs validation.
