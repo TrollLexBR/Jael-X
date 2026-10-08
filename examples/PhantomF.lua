@@ -39,7 +39,7 @@ local UIS = game:GetService("UserInputService")
 local RS = game:GetService("RunService")
 local CFG = {
 	aim = true, chams = true, nametags = true, teamCheck = true, showFov = true,
-	wallCheck = true, visibilityColors = true, lightweight = true, memoryBudgetMB = 48,
+	wallCheck = true, visibilityColors = true, lightweight = true,
 	visibleColor = Color3.fromRGB(80, 235, 135),
 	blockedColor = Color3.fromRGB(255, 70, 90),
 	unknownColor = Color3.fromRGB(150, 150, 160),
@@ -75,7 +75,7 @@ pcall(function()
 	local ok,raw=pcall(function()return buffer.tostring(fs.read_async(configFile))end)
 	if not ok then raw=buffer.tostring(fs.read_async("pf_assist_config.json")) end
 	local values=HTTP:JSONDecode(raw);values.smoothing=values.smoothing or values.smooth
-	local ranges={memoryBudgetMB={16,48},smoothing={0,100},fov={40,400},maxDistance={10,10000},visualRange={10,10000},opacity={0,1},nameSize={8,24},thickness={1,4},fpsCap={30,240},rosterRate={.2,2}}
+	local ranges={smoothing={0,100},fov={40,400},maxDistance={10,10000},visualRange={10,10000},opacity={0,1},nameSize={8,24},thickness={1,4},fpsCap={30,240},rosterRate={.2,2}}
 	local choices={targetMode={"Closest to crosshair","Closest to player","Lowest health"},targetPart={"Head","Torso"},boxStyle={"Corners","Full box"},tracerOrigin={"Top","Center","Bottom"}}
 	for key,value in pairs(values) do
 		if type(CFG[key])=="boolean" and type(value)=="boolean" then CFG[key]=value
@@ -356,12 +356,6 @@ local function thinIntersection(part,origin,destination)
 end
 -- Native scenes cap part count. Larger maps use an immutable spatial snapshot,
 -- built cooperatively, then segment traversal touches only intersected grid cells.
-local function memoryWithinBudget()
-	local used=collectgarbage("count")/1024
-	if used>CFG.memoryBudgetMB then collectgarbage("collect");used=collectgarbage("count")/1024 end
-	APP.stats.luaMemoryMB=used
-	return used<=CFG.memoryBudgetMB
-end
 local CELL=64
 local function cellKey(x,y,z)return x..":"..y..":"..z end
 buildSpatialCache=function(root,nodes,recursive)
@@ -377,10 +371,6 @@ buildSpatialCache=function(root,nodes,recursive)
 				if not running()or spatialCache~=cache then return end
 				if index%32==0 then
 					collectgarbage("step",256)
-					if not memoryWithinBudget()then
-						cache.cells={};cache.large={};cache.error="Lua memory budget reached; raise budget and rebuild cache"
-						visibilityEntries={};return
-					end
 					task.wait(.002)
 				end
 				if part:IsA("BasePart")then
@@ -703,11 +693,7 @@ end)
 	while running()do
 		if os.clock()>=nextPrune then
 			nextPrune=os.clock()+2
-			if not memoryWithinBudget()and spatialCache.ready then
-				spatialCache.cells={};spatialCache.large={};spatialCache.ready=false
-				spatialCache.error="Lua memory budget reached; rebuild visibility cache"
-				visibilityEntries={};collectgarbage("step",256)
-			end
+			APP.stats.luaMemoryMB=collectgarbage("count")/1024
 			for key in pairs(visibilityEntries)do if not read(key,"Parent")then visibilityEntries[key]=nil end end
 		end
 		local requests=visibilityRequests
@@ -815,10 +801,6 @@ local okUI,whyUI=pcall(function()
 	performance:AddButton({text="Save current settings",callback=function()saveConfig();local ok,err=w:SaveConfig("Last session");assert(ok,err);Library:Notify("Saved","Current settings and JoX profile saved")end})
 	performance:AddButton({text="Unload everything",callback=APP.stop})
 	performance:AddParagraph({text="RightCtrl: menu. F2: aim. F3: chams. F4 or End: unload. Options autosave; Configs stores named profiles. Unload disconnects every signal and removes all Drawing objects."})
-	local memory=w.tabs[#w.tabs]:NewSection("Script memory","left")
-	slider(memory,"memoryBudgetMB","Lua memory budget (MB)",16,48,1)
-	memory:AddLabel({text="Lua memory",get=function()return string.format("Lua: %.1f MB / budget %d MB",APP.stats.luaMemoryMB or 0,CFG.memoryBudgetMB)end})
-	memory:AddParagraph({text="Soft budget for Lua allocations, not total Jael X/Roblox RAM. The script discards an over-budget spatial cache; aim waits for valid geometry. This cannot raise the app VM limit. After raising the budget, use Runtime > Rebuild visibility cache."})
 	combat:Select();Library:SetVisible(false)
 	Library:Notify("PF JoX","RightCtrl opens settings. Hold your aim key with the menu closed.")
 end)

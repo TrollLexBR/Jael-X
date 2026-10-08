@@ -185,3 +185,7 @@ Maps beyond native limits use compact numeric OBBs in a 64-stud spatial grid bui
 Configs > Script memory includes a 16–48 MB Lua allocation soft budget (default 48) and current usage. It measures the script's Lua memory, not total app/game RAM or shader VRAM, and does not change the app VM hard limit. Above budget it collects memory and aborts/discards the spatial cache; aim stays blocked until a valid rebuild.
 
 Offline tests cover stale/moved aim checks, visual retention, native snapshot expiry, spatial intersections and budget abort. Live 1.31.2 builds completed 16443 and 27924 parts with zero unreadable geometry; sampled ready-cache queries were approximately 0.06–0.10 ms. This is not a shader FPS benchmark.
+
+### App-native memory limit (Jael X 1.31.4)
+
+The Phantom Forces script no longer contains a memory budget slider or script-owned ceiling. Configure Settings > General > Script memory limit in Jael X 1.31.4, from 0.25 to 4 GB (default 0.50 GB). The app enforces it per worker on the next execution; it does not reserve RAM or control Roblox/shader memory. Compact snapshots and rate-limited queries remain unchanged. Older script memory flags are ignored when loading profiles.
