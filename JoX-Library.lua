@@ -10,7 +10,7 @@ local HTTP = game:GetService("HttpService")
 assert(immediate and immediate.push_clip and font, "JoX Library requires Jael X with clipping support")
 local previous=shared.JoXLibrary or shared.JaelDrawingUI
 if previous and previous.Unload then pcall(function() previous:Unload() end) end
-local Library = { Version = "1.1.1", Windows = {}, Connections = {}, Alive = true, Visible = true, ToggleKey = "RightControl",
+local Library = { Version = "1.1.2", Windows = {}, Connections = {}, Alive = true, Visible = true, ToggleKey = "RightControl",
 	Rounding = 2, Notifications = true, NotificationDuration = 4, NotificationPosition = "Bottom right" }
 shared.JaelDrawingUI = Library
 shared.JoXLibrary = Library
@@ -48,6 +48,25 @@ local function rect(x,y,w,h,color,radius,filled)
 end
 local function text(x,y,s,color,size)
 	immediate.text(Vector2.new(x,y),tostring(s),fd(size or 13),false,color or Theme.text)
+end
+-- DirectWrite draws a text layout from its top, not from the visible glyph top.
+-- Center the measured line box consistently instead of per-control Y offsets.
+local measureCache,measureCount={},0
+local function textBounds(value,size)
+	local key=tostring(size).."/"..value
+	if not measureCache[key]then
+		if measureCount>=512 then measureCache={};measureCount=0 end
+		local ok,bounds=pcall(immediate.calculate_text_size,value,fd(size))
+		measureCache[key]=ok and bounds or Vector2.new(#value*size*.52,size*1.33)
+		measureCount=measureCount+1
+	end
+	return measureCache[key]
+end
+local function rowText(x,y,width,height,value,color,size,align)
+	size=size or 12;value=tostring(value)
+	local bounds=textBounds(value,size)
+	if align=="center"then x=x+(width-bounds.X)/2 elseif align=="right"then x=x+width-bounds.X end
+	text(x,y+(height-bounds.Y)/2,value,color,size)
 end
 local function line(x,y,w,color) rect(x,y,w,1,color or Theme.border,0) end
 local function inside(p,x,y,w,h) return p.X>=x and p.Y>=y and p.X<x+w and p.Y<y+h end
@@ -403,15 +422,15 @@ local function renderControl(c,x,y,width,clipTop,clipBottom)
 	if c.kind=="paragraph"then for i,s in ipairs(wrap(c.title,width-24,12))do text(x+12,y+4+(i-1)*16,s,Theme.muted,12)end;return height end
 	if c.kind=="label"then
 		local v=c.title;if c.getter then local ok,result=pcall(c.getter);if ok then v=result end end
-		text(x+12,y+4,v,fg,12);return height
+		rowText(x+12,y,width-24,20,v,fg,12);return height
 	end
 	if c.kind=="button"then
 		local color=not c.disabled and (c.style=="primary" and Theme.accent or c.style=="danger" and Theme.danger)or Theme.field
 		rect(x+12,y+2,width-24,19,color,1);rect(x+12,y+2,width-24,19,inside(mouse,x+12,y+2,width-24,19)and Theme.accent or Theme.border,1,false)
-		text(x+20,y+5,c.title,fg,12)
+		rowText(x+20,y+2,width-40,19,c.title,fg,12)
 		interact(x+12,y+2,width-24,19,function()callback(c.callback)end);return height
 	end
-	text(x+(c.kind=="toggle" and 31 or 12),y+3,c.title,fg,12)
+	rowText(x+(c.kind=="toggle" and 31 or 12),y,width-45,20,c.title,fg,12)
 	if c.kind=="toggle"then
 		rect(x+12,y+4,12,12,c.value and Theme.accent or Theme.field,1)
 		rect(x+12,y+4,12,12,c.value and Theme.accent or Theme.border,1,false)
@@ -420,26 +439,26 @@ local function renderControl(c,x,y,width,clipTop,clipBottom)
 		local bx,bw=x+12,width-24;local fraction=(c.value-c.min)/(c.max-c.min)
 		rect(bx,y+21,bw,12,Theme.field,1);rect(bx,y+21,math.max(1,bw*fraction),12,Theme.accent,1);rect(bx,y+21,bw,12,Theme.border,1,false)
 		local display=editing and editing.control==c and editing.buffer.."|" or string.format("%.4g",c.value)
-		text(bx+bw/2-#display*2.7,y+21,display,fg,11)
+		rowText(bx,y+21,bw,12,display,fg,11,"center")
 		interact(bx,y+18,bw,19,function()beginSlider(c,bx,bw)end)
 		interact(bx+bw/2-30,y+21,60,12,function()startEdit(c,function(v)set(c,v)end,c.value)end)
 		if active and not c.disabled then hit(bx,y,bw,height,nil,c.tooltip,c.window,function(delta)set(c,c.value+delta*(c.step or (c.max-c.min)/100))end)end
 	elseif c.kind=="input" or c.kind=="dropdown"then
 		rect(x+12,y+19,width-24,18,Theme.field,1);rect(x+12,y+19,width-24,18,Theme.border,1,false)
 		local value=editing and editing.control==c and editing.buffer.."|" or valueText(c)
-		clip(x+17,y+20,width-44,16);text(x+18,y+21,value=="" and c.placeholder or value,fg,11);immediate.pop_clip()
-		if c.kind=="dropdown"then text(x+width-24,y+21,"+",Theme.muted,11)end
+		clip(x+17,y+19,width-44,18);rowText(x+18,y+19,width-44,18,value=="" and c.placeholder or value,fg,11);immediate.pop_clip()
+		if c.kind=="dropdown"then rowText(x+width-30,y+19,18,18,"+",Theme.muted,11,"center")end
 		interact(x+12,y+19,width-24,18,function()
 			if c.kind=="input"then startEdit(c,function(v)set(c,v)end,c.value)
 			else popup=popup and popup.control==c and nil or {control=c,x=x+12,y=y+39,width=width-24,scroll=0}end
 		end)
 	elseif c.kind=="keybind"then
 		local binding=capture==c and "Press a key..." or c.value
-		rect(x+width-114,y+2,102,18,Theme.field,1);rect(x+width-114,y+2,102,18,Theme.border,1,false)
-		text(x+width-106,y+5,binding,Theme.muted,11)
+		rect(x+width-114,y+1,102,18,Theme.field,1);rect(x+width-114,y+1,102,18,Theme.border,1,false)
+		rowText(x+width-106,y+1,86,18,binding,Theme.muted,11)
 		interact(x+width-114,y+2,102,18,function()capture=c;popup=nil;editing=nil end)
 	elseif c.kind=="color"then
-		rect(x+width-37,y+6,24,11,Color3.fromRGB(table.unpack(c.value)),0);rect(x+width-38,y+5,26,13,Theme.border,0,false)
+		rect(x+width-37,y+5,24,11,Color3.fromRGB(table.unpack(c.value)),0);rect(x+width-38,y+4,26,13,Theme.border,0,false)
 		interact(x+width-40,y+1,31,21,function()popup=popup and popup.control==c and nil or {control=c,x=x+width-282,y=y+24,width=282}end)
 	elseif c.kind=="progress"then
 		local v=c.value;if c.getter then local ok,result=pcall(c.getter);if ok then v=result end end;v=finite(v)and clamp(v,0,1)or 0
@@ -453,8 +472,8 @@ local function renderWindow(w)
 	rect(x+4,y+5,width,height,Color3.fromRGB(8,3,7),0)
 	rect(x,y,width,height,Theme.background,1);rect(x,y,width,height,Theme.border,1,false)
 	rect(x+3,y+3,width-6,height-6,Theme.accent,0,false)
-	clip(x+12,y+5,width-290,18);text(x+12,y+7,w.title,Theme.muted,12);immediate.pop_clip()
-	text(x+width-46,y+6,w.minimized and "+"or "-",Theme.muted,12);text(x+width-25,y+6,"x",Theme.muted,12)
+	clip(x+12,y+5,width-290,18);rowText(x+12,y+4,width-290,20,w.title,Theme.muted,12);immediate.pop_clip()
+	rowText(x+width-52,y+4,21,19,w.minimized and "+"or "-",Theme.muted,12,"center");rowText(x+width-29,y+4,21,19,"x",Theme.muted,12,"center")
 	hit(x+width-52,y+4,21,19,function()w.minimized=not w.minimized;clearFocus()end,"Minimize",w)
 	hit(x+width-29,y+4,21,19,function()w:SetVisible(false)end,"Hide window",w)
 	hit(x+6,y+4,width-65,20,function()drag={window=w,dx=mouse.X-x,dy=mouse.Y-y}end,nil,w)
@@ -464,9 +483,9 @@ local function renderWindow(w)
 	local query=editing and editing.control==w.searchControl and editing.buffer or w.query
 	local sx,sw=x+width-239,175
 	rect(sx,y+6,sw,17,Theme.field,1)
-	clip(sx+6,y+7,sw-23,15);text(sx+6,y+8,query==""and "Search... / Ctrl+K"or query,Theme.muted,10);immediate.pop_clip()
+	clip(sx+6,y+7,sw-23,15);rowText(sx+6,y+6,sw-23,17,query==""and "Search... / Ctrl+K"or query,Theme.muted,10);immediate.pop_clip()
 	hit(sx,y+6,sw-20,17,function()startEdit(w.searchControl,function(v)w:SetSearch(v)end,w.query)end,"Search this page",w)
-	if query~=""then text(sx+sw-13,y+8,"x",Theme.muted,10);hit(sx+sw-20,y+6,20,17,function()editing=nil;w:SetSearch("")end,"Clear search",w)end
+	if query~=""then rowText(sx+sw-20,y+6,20,17,"x",Theme.muted,10,"center");hit(sx+sw-20,y+6,20,17,function()editing=nil;w:SetSearch("")end,"Clear search",w)end
 	local nx,nw,ny,nh=x+12,width-24,y+32,29
 	local tabWidth=math.max(94,nw/math.max(1,#w.tabs));local navTotal=tabWidth*#w.tabs
 	w.tabScroll=clamp(w.tabScroll,0,math.max(0,navTotal-nw))
@@ -477,8 +496,8 @@ local function renderWindow(w)
 		rect(tx,ny,tabWidth-2,nh,active and Theme.header or Theme.panel,0);rect(tx,ny,tabWidth-2,nh,Theme.border,0,false)
 		if active then line(tx+1,ny+nh-2,tabWidth-4,Theme.accent)end
 		local label=t.icon and (tostring(t.icon).." "..t.title)or t.title
-		clip(tx+6,ny+5,tabWidth-(t.badge and 42 or 14),20);text(tx+tabWidth/2-#label*3,ny+8,label,active and Theme.accent or Theme.muted,12);immediate.pop_clip()
-		if t.badge then text(tx+tabWidth-27,ny+8,tostring(t.badge),Theme.accent,10)end
+		clip(tx+6,ny+5,tabWidth-(t.badge and 42 or 14),20);rowText(tx+6,ny,tabWidth-14,nh,label,active and Theme.accent or Theme.muted,12,"center");immediate.pop_clip()
+		if t.badge then rowText(tx+tabWidth-27,ny,21,nh,t.badge,Theme.accent,10,"center")end
 		if tx>=nx and tx+tabWidth-2<=nx+nw then hit(tx,ny,tabWidth-2,nh,function()t:Select()end,t.description,w)end
 	end
 	immediate.pop_clip()
@@ -522,7 +541,7 @@ local function renderWindow(w)
 		for _,s in ipairs(t.sections)do if sectionShown(s) and s.column==column then
 			if sy+s.height>=cy and sy<=cy+ch then
 				rect(colX,sy,colWidth,s.height,Theme.panel,0);rect(colX,sy,colWidth,s.height,Theme.border,0,false);line(colX+1,sy,colWidth-2,Theme.accent)
-				text(colX+10,sy+6,s.title,Theme.text,12);text(colX+colWidth-19,sy+6,s.collapsed and "+"or "-",Theme.muted,11)
+				rowText(colX+10,sy,colWidth-35,23,s.title,Theme.text,12);rowText(colX+colWidth-26,sy,20,23,s.collapsed and "+"or "-",Theme.muted,11,"center")
 				if sy>=cy and sy+23<=cy+ch then hit(colX,sy,colWidth,23,function()s.collapsed=not s.collapsed;clearFocus()end,nil,w)end
 				if not s.collapsed or needle~=""then
 					line(colX+10,sy+23,colWidth-20)
@@ -576,7 +595,7 @@ local function renderPopup(view)
 			local oy=p.y+4+(i-1)*28-p.scroll
 			local yes=c.multi and selected(c.value,option) or (not c.multi and c.value==option)
 			if yes then rect(p.x+4,oy,p.width-8,27,Theme.field,3) end
-			text(p.x+12,oy+7,(yes and "+ " or "  ")..option,yes and Theme.accent or Theme.text)
+			rowText(p.x+12,oy,p.width-24,27,(yes and "+ " or "  ")..option,yes and Theme.accent or Theme.text,13)
 			if oy>=p.y+3 and oy+27<=p.y+height-3 then hit(p.x+4,oy,p.width-8,27,function()
 				if c.multi then local v=copy(c.value);if yes then for j,x in ipairs(v) do if x==option then table.remove(v,j);break end end else v[#v+1]=option end;set(c,v)
 				else set(c,option);popup=nil end
@@ -621,21 +640,21 @@ local function renderPopup(view)
 			text(xx,p.y+247,name,Theme.muted,10)
 			rect(xx,p.y+263,80,27,Theme.field,4)
 			local current=editing and editing.control==c and editing.channel==i and editing.buffer.."|" or tostring(c.value[i])
-			text(xx+10,p.y+270,current,Theme.text,12)
+			rowText(xx+10,p.y+263,60,27,current,Theme.text,12)
 			hit(xx,p.y+263,80,27,function()
 				startEdit(c,function(raw)local n=tonumber(raw);assert(finite(n) and n>=0 and n<=255,"Use an RGB channel from 0 to 255");local rgb=copy(c.value);rgb[i]=n;set(c,rgb)end,c.value[i]);editing.channel=i
 			end,"Edit "..name.." channel",c.window)
 		end
 		text(gx,p.y+300,"HEX",Theme.muted,10)
 		rect(gx,p.y+316,p.width-84,28,Theme.field,4)
-		text(gx+10,p.y+324,editing and editing.control==c and not editing.channel and editing.buffer.."|" or valueText(c),Theme.text,12)
+		rowText(gx+10,p.y+316,p.width-104,28,editing and editing.control==c and not editing.channel and editing.buffer.."|" or valueText(c),Theme.text,12)
 		hit(gx,p.y+316,p.width-84,28,function()
 			startEdit(c,function(v)
 				local hex=v:gsub("#","");assert(hex:match("^%x%x%x%x%x%x$"),"Use #RRGGBB")
 				set(c,{tonumber(hex:sub(1,2),16),tonumber(hex:sub(3,4),16),tonumber(hex:sub(5,6),16)})
 			end,valueText(c))
 		end,"Edit hex color",c.window)
-		rect(p.x+p.width-61,p.y+316,49,28,Theme.field,4);text(p.x+p.width-52,p.y+324,"Copy",Theme.accent,11)
+		rect(p.x+p.width-61,p.y+316,49,28,Theme.field,4);rowText(p.x+p.width-61,p.y+316,49,28,"Copy",Theme.accent,11,"center")
 		hit(p.x+p.width-61,p.y+316,49,28,function()if setclipboard then pcall(setclipboard,valueText(c))end end,"Copy hex",c.window)
 		text(gx,p.y+353,"Drag to preview  /  Enter to apply text",Theme.muted,10)
 	end

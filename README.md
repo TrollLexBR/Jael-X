@@ -147,3 +147,9 @@ Preview images below are rendered from captured Drawing commands, not screenshot
 Only the presentation and default palette change. The methods, callback payloads, flags, configuration namespace and loading URL stay compatible with 1.1.0. Existing scripts can use the new layout without changing their builders. Wine is the new default accent, and previously saved custom colors still restore normally.
 
 The reference layout uses horizontal tabs, compact checkbox rows, thin magenta separators and filled sliders with centered editable values. Sections keep their two independent scroll areas, and search and the HSV/RGB/HEX color picker remain available. Validation includes clicking the new checkbox/field positions, configuration roundtrip, color editing and the Fisch integration. Preview images are offline renders.
+
+## Version 1.1.2 text alignment
+
+Control captions, checkbox labels, slider values, dropdown values/arrows, buttons, keybinds, tabs and color editor fields share measured DirectWrite line-box alignment. Slider numbers are also centered horizontally using measured width rather than character-count estimates. Cached measurements are bounded to avoid retaining unlimited dynamic text.
+
+The offline preview respects font ascender/baseline bearings instead of treating visible glyph bounds as the layout origin. Regression checks compare the rendered text line centers to slider, dropdown and button rectangles using the native font measurement API. Public methods and saved configuration flags remain unchanged.
