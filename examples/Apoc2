@@ -1,0 +1,851 @@
+--[[
+	AR2_JOX — external Apocalypse Rising 2 information and ESP overlay.
+	Place: 863266079; additional AR2 maps accepted by the reference folder layout.
+	RightControl: menu. F6: ESP. F7: align map at cursor. End: unload.
+	JoX UI loads from TrollLexBR/Jael-X. Aim assist uses relative mouse input only when enabled and held.
+	LootGroup NumberValues describe spawn categories, not confirmed contents.
+]]
+local ENV=shared
+local previousMapOpen=ENV.AR2_JOX and ENV.AR2_JOX.alive and ENV.AR2_JOX.mapOpen
+if ENV.AR2_JOX and ENV.AR2_JOX.stop then pcall(ENV.AR2_JOX.stop)end
+local Players=game:GetService("Players")
+local RS=game:GetService("RunService")
+local UIS=game:GetService("UserInputService")
+-- External string reads and byte truncation can contain incomplete UTF-8.
+local function cleanText(value)
+	local s=tostring(value);local out={};local i=1
+	while i<=#s do
+		local a,b,c,d=s:byte(i,i+3);local n=1
+		local function continuation(v)return v and v>=128 and v<=191 end
+		if a<128 then n=1
+		elseif a>=194 and a<=223 and continuation(b)then n=2
+		elseif a>=224 and a<=239 and continuation(b)and continuation(c)and(a~=224 or b>=160)and(a~=237 or b<=159)then n=3
+		elseif a>=240 and a<=244 and continuation(b)and continuation(c)and continuation(d)and(a~=240 or b>=144)and(a~=244 or b<=143)then n=4
+		else out[#out+1]="?";i=i+1;n=0 end
+		if n>0 then out[#out+1]=s:sub(i,i+n-1);i=i+n end
+	end
+	return table.concat(out)
+end
+local function read(o,k,fallback)
+	if not o then return fallback end
+	local ok,v=pcall(function()return o[k]end)
+	if ok and v~=nil then return type(v)=="string"and cleanText(v)or v end
+	return fallback
+end
+local function child(o,n)
+	if not o then return nil end
+	local ok,v=pcall(function()return o:FindFirstChild(n)end)
+	return ok and v or nil
+end
+local function children(o)
+	if not o then return {}end
+	local ok,v=pcall(function()return o:GetChildren()end)
+	return ok and v or {}
+end
+local function isa(o,c)local ok,v=pcall(function()return o:IsA(c)end);return ok and v end
+local function path(o,names)for name in names:gmatch("[^/]+")do o=child(o,name);if not o then break end end;return o end
+local function supported()
+	return game.PlaceId==863266079 or (child(workspace,"Characters")and child(workspace,"Zombies")and path(workspace,"Map/Elements"))~=nil
+end
+if not supported()then warn("[AR2_JOX] Open Apocalypse Rising 2 before running this script.");return end
+local APP={alive=true,connections={},groups={Zombie={},Character={},Vehicle={},Loot={},Zone={}},zones={},controls={},
+	nearby={Zombie={},Character={},Vehicle={},Loot={},Zone={}},faults=0,scanNodes=0,scanOverflow=0,poseMs=0,gui={},guiValues={},
+	config={esp=true,loot=false,zombies=false,vehicles=false,characters=true,highValue=false,search="",categories={},
+		aimEnabled=true,showFov=true,fovRadius=120,aimBind="MB2",aimPlayers=true,aimZombies=false,aimSmooth=0,aimRange=1500,
+		prediction=true,predictionStrength=100,bulletSpeed=6000,bulletGravity=0,fovColor=Color3.fromRGB(220,220,230),
+		lootRange=600,zombieRange=800,vehicleRange=1200,characterRange=1000,labels=48,fontSize=12,distance=true,tags=true,
+		mapEnabled=true,mapPlayers=true,mapVehicles=false,mapZombies=false,mapLoot=false,mapPlayerLabels=true,mapVehicleLabels=true,mapZombieLabels=true,mapUsername=false,mapDotSize=4,mapMaxDots=512,mapOffsetX=0,mapOffsetY=0,mapSizeScale=1,
+		markers=true,combat=true,hud=true,panelZombies=true,panelPlayers=true,panelVehicles=true,
+		lootColor=Color3.fromRGB(110,185,255),highColor=Color3.fromRGB(255,205,80),zombieColor=Color3.fromRGB(255,100,100),
+		vehicleColor=Color3.fromRGB(255,165,65),playerColor=Color3.fromRGB(190,155,255)}}
+ENV.AR2_JOX=APP
+local C=APP.config
+local options=ENV.AR2_JOX_OPTIONS or {}
+ENV.AR2_JOX_OPTIONS=nil
+if type(options.aimEnabled)=="boolean"then C.aimEnabled=options.aimEnabled end
+if type(options.mapOpen)=="boolean"then APP.mapOpen=options.mapOpen else APP.mapOpen=previousMapOpen==true end
+local HTTP=game:GetService("HttpService")
+local autoConfigPath="JaelConfigs/ar2-auto-config.json"
+local lastSavedConfig
+function APP.saveConfig()
+	if not APP.window then return end
+	local ok,raw=pcall(function()return APP.window:ExportConfig()end)
+	if ok and raw~=lastSavedConfig then
+		local saved,err=pcall(function()
+			if not fs.is_directory("JaelConfigs")then fs.create_directory("JaelConfigs")end
+			fs.write_async(autoConfigPath,raw)
+		end)
+		APP.configSaveError=not saved and cleanText(err)or nil
+		if saved then lastSavedConfig=raw end
+	end
+end
+for _,suffix in ipairs({"Players","Zombies","Vehicles"})do
+	for _,effect in ipairs({"names","box","tracer","chams","health"})do
+		C[effect..suffix]=suffix=="Players"and(effect=="names"or effect=="box")or false
+	end
+end
+C.boxCorners=false;C.boxFilled=false;C.chamsOpacity=30;C.tracerOrigin="Bottom"
+
+local alignmentPath="JaelConfigs/ar2-map-alignment.json"
+local alignments={}
+local function alignmentKey(width,height)return string.format("%.0f:%.0fx%.0f",game.PlaceId,width,height)end
+local loadedAlignment,alignmentData=pcall(function()return HTTP:JSONDecode(buffer.tostring(fs.read_async(alignmentPath)))end)
+if loadedAlignment and type(alignmentData)=="table"then alignments=alignmentData end
+local function validAlignment(record)
+	return type(record)=="table"and type(record.x)=="number"and type(record.y)=="number"
+		and math.abs(record.x)<=500 and math.abs(record.y)<=500
+end
+local function saveAlignments()
+	return pcall(function()
+		if not fs.is_directory("JaelConfigs")then fs.create_directory("JaelConfigs")end
+		fs.write_async(alignmentPath,HTTP:JSONEncode(alignments))
+	end)
+end
+-- A measured live alignment can be supplied once; never assume it fits every viewport.
+if options.mapAlignment and validAlignment(options.mapAlignment)then
+	local a=options.mapAlignment
+	if type(a.width)=="number"and type(a.height)=="number"then
+		local key=alignmentKey(a.width,a.height)
+		if not validAlignment(alignments[key])then alignments[key]={x=a.x,y=a.y};saveAlignments()end
+	end
+end
+local mapTransforms={
+	-- Measured from two local-marker/world samples in the Reimagined map.
+	[81089296768446]={sx=.00013952838985023115,sz=.0001395283644795152,bx=.4995814052588981,bz=.5005580371459838},
+}
+local lp=Players.LocalPlayer
+local fontCache={}
+local function fontAt(size)
+	fontCache[size]=fontCache[size]or font.get_font_descriptor("Tahoma",size)
+	return fontCache[size]
+end
+local function text(p,label,col,size)immediate.text(p,cleanText(label),fontAt(size or C.fontSize),true,col)end
+function APP.stop()
+	if not APP.alive then return end
+	if APP.saveConfig then APP.saveConfig()end
+	APP.alive=false
+	for _,c in ipairs(APP.connections)do pcall(function()c:Disconnect()end)end
+	if APP.Library then pcall(function()APP.Library:Unload()end)end
+	APP.groups={Zombie={},Character={},Vehicle={},Loot={},Zone={}};APP.jobs={};APP.scan=nil
+	if ENV.AR2_JOX==APP then ENV.AR2_JOX=nil end
+	print("[AR2_JOX] Unloaded")
+end
+local function running()return APP.alive and ENV.AR2_JOX==APP end
+-- Resolve metadata cooperatively; never traverse the entire map in one frame.
+local function anchor(model,vehicle)
+	local primary=read(model,"PrimaryPart")
+	if primary and isa(primary,"BasePart")and not vehicle then return primary,true end
+	for _,name in ipairs(vehicle and {"Driver"}or {"HumanoidRootPart","BasePart","Root","Head"})do
+		local part=child(model,name);if part and isa(part,"BasePart")then return part,true end
+	end
+	return nil,false
+end
+local function enqueue(kind,model,meta)
+	if APP.groups[kind][model]then return end
+	APP.pending=APP.pending or {}
+	if APP.pending[model]then return end
+	APP.pending[model]=true
+	local part,ready=anchor(model,kind=="Vehicle")
+	if ready then
+		meta.model=model;meta.part=part;meta.kind=kind;APP.groups[kind][model]=meta;APP.pending[model]=nil
+	else
+		APP.jobs[#APP.jobs+1]={kind=kind,model=model,meta=meta,queue={model},at=1,visited=0}
+	end
+end
+APP.jobs={};APP.pending={}
+local function resolveJobs()
+	local started=os.clock();local budget=16
+	while budget>0 and #APP.jobs>0 and os.clock()-started<.004 do
+		local job=APP.jobs[1];local node=job.queue[job.at]
+		if not node or job.visited>=256 or not read(job.model,"Parent")then
+			APP.pending[job.model]=nil;table.remove(APP.jobs,1)
+		else
+			job.at=job.at+1;job.visited=job.visited+1;budget=budget-1
+			local found
+			for _,o in ipairs(children(node))do
+				if isa(o,"BasePart")then
+					job.fallback=job.fallback or o
+					if job.kind~="Vehicle"or (isa(o,"VehicleSeat")and read(o,"Name")=="Driver")then found=o;break end
+				elseif (isa(o,"Model")or isa(o,"Folder"))and read(o,"Name")~="LootGroup"then job.queue[#job.queue+1]=o end
+			end
+			if not found and not job.queue[job.at]then found=job.fallback end
+			if found then
+				local e=job.meta;e.model=job.model;e.part=found;e.kind=job.kind
+				APP.groups[job.kind][job.model]=e;if job.kind=="Zone"then APP.zones[job.model]=e end;APP.pending[job.model]=nil;table.remove(APP.jobs,1)
+			end
+		end
+	end
+end
+local function roster(kind,folder)
+	local seen={};local localChar=read(lp,"Character");local localName=read(lp,"Name","")
+	local byCharacter,byName={},{}
+	if kind=="Character"then for _,player in ipairs(children(Players))do if isa(player,"Player")then
+		local name=read(player,"Name");local character=read(player,"Character")
+		local identity={username=name,displayName=read(player,"DisplayName",name)}
+		if character then byCharacter[character]=identity end;if name then byName[name]=identity end
+	end end end
+	for _,model in ipairs(children(folder))do
+		if isa(model,"Model")and model~=localChar and not(kind=="Character"and read(model,"Name")==localName)then
+			seen[model]=true;enqueue(kind,model,{name=read(model,"Name",kind)})
+			local entry=APP.groups[kind][model]or APP.pending[model]
+			if kind=="Character"and type(entry)=="table"then
+				local identity=byCharacter[model]or byName[read(model,"Name")]
+				entry.username=identity and identity.username or nil;entry.displayName=identity and identity.displayName or nil
+			end
+		end
+	end
+	for model,e in pairs(APP.groups[kind])do
+		if not seen[model]or not read(e.part,"Parent")then APP.groups[kind][model]=nil end
+	end
+end
+local function playerLabel(entry,includeUsername)
+	local label=entry.displayName or entry.username or entry.name
+	if includeUsername and entry.username then label=label.." (@"..entry.username..")"end
+	return label
+end
+APP.playerLabel=playerLabel
+local priority={Firearms=true,Ammo=true,Medical=true,MeleeWeapons=true,Backpacks=true,VehicleParts=true,Attachments=true,Winchester=true}
+local zones={{"Radar","Military relay"},{"Military","Military site"},{"Airport","Airport"},{"Airfield","Airport"},
+	{"Airstrip","Airstrip"},{"Huron","Huron"},{"University","University"},{"Monastery","Monastery"},
+	{"NavalAir","Naval air station"},{"JROTC","JROTC camp"},{"Junkyard","Junkyard"},{"WaterTreatment","Water treatment"},
+	{"Observatory","Observatory"},{"RadioStation","Radio station"},{"Shipyard","Shipyard"},{"GasStation","Gas station"},
+	{"Lumber","Lumber yard"},{"Sawmill","Lumber yard"},{"Farm","Farm"},{"Barn","Farm"}}
+local function categories(model)
+	local list,seen,high={}, {},false
+	for _,o in ipairs(children(model))do
+		if isa(o,"NumberValue")then
+			local category=read(o,"Name",""):match("^(%S+)")
+			if category and not seen[category]then list[#list+1]=category;seen[category]=true;high=high or priority[category]==true end
+		end
+	end
+	table.sort(list);return list,high
+end
+local function beginScan()
+	local elements=path(workspace,"Map/Elements")
+	if not elements then APP.scanStatus="Map/Elements unavailable";return end
+	APP.scanEpoch=(APP.scanEpoch or 0)+1
+	APP.scan={queue=children(elements),at=1,seen={},elements=elements,epoch=APP.scanEpoch,nodes=0}
+	APP.scanStatus="Scanning loaded map"
+end
+local function worldStep()
+	local scan=APP.scan;if not scan then return end
+	local began=os.clock();local budget=24
+	while budget>0 and os.clock()-began<.004 do
+		local node=scan.queue[scan.at]
+		if not node or scan.nodes>=25000 then
+			for model,e in pairs(APP.groups.Loot)do if e.epoch~=scan.epoch then APP.groups.Loot[model]=nil end end
+			APP.scanStatus=node and "Scan budget reached; partial loaded map"or "Loaded map scanned"
+			APP.scanOverflow=node and 1 or 0;APP.scan=nil;APP.nextWorld=os.clock()+20;return
+		end
+		scan.at=scan.at+1;scan.nodes=scan.nodes+1;APP.scanNodes=scan.nodes;budget=budget-1
+		if not scan.seen[node]then
+			scan.seen[node]=true;local name=read(node,"Name","")
+			local ch=children(node)
+			if read(node,"Parent")==scan.elements then
+				for _,pair in ipairs(zones)do
+					if name:find(pair[1],1,true)then
+						local part=anchor(node,false)
+						if not part then for _,o in ipairs(ch)do if isa(o,"BasePart")then part=o;break end end end
+						if part then APP.zones[node]={name=pair[2],part=part}else enqueue("Zone",node,{name=pair[2]})end;break
+					end
+				end
+			end
+			for _,o in ipairs(ch)do
+				if (isa(o,"Model")or isa(o,"Folder"))and read(o,"Name")~="LootGroup"then
+					if #scan.queue<30000 then scan.queue[#scan.queue+1]=o else APP.scanOverflow=APP.scanOverflow+1 end
+				end
+			end
+		end
+	end
+end
+local guiPaths={weapon="Weapon/Bin/Context/Item/ItemName",ammo="Weapon/Bin/Context/Ammo/Number",
+	capacity="Weapon/Bin/Context/Ammo/Capacity",magazines="Weapon/Bin/Context/Magazines/TextLabel",mode="Weapon/Bin/Context/Mode/TextLabel",
+	fps="DebugText/Left/FPS",ping="DebugText/Left/cPing",region="DebugText/Right/sLoc",combat="Hotbar/Main/Combat",
+	combatTime="Hotbar/Main/Combat/Timer/TextLabel",slot="Weapon/Bin/Context/Item/HotbarNumber"}
+local function refreshInfo()
+	local gui=child(lp,"PlayerGui");local char=read(lp,"Character")or child(child(workspace,"Characters"),read(lp,"Name",""))
+	APP.localRoot=child(char,"HumanoidRootPart");APP.humanoid=child(char,"Humanoid")
+	for key,p in pairs(guiPaths)do APP.gui[key]=path(gui,p);APP.guiValues[key]=read(APP.gui[key],"Text","Unavailable")end
+	APP.combat=read(APP.gui.combat,"Visible",false)==true
+	APP.hp=read(APP.humanoid,"Health");APP.maxHp=read(APP.humanoid,"MaxHealth")
+	APP.hotbar={};for i=1,8 do APP.hotbar[i]=read(path(gui,"Hotbar/Main/Slots/Slot "..i.."/Stack/Number"),"Text","?")end
+	for kind,group in pairs(APP.groups)do
+		if kind~="Loot"and kind~="Zone"then for _,e in pairs(group)do
+			local animator=child(e.model,"Animator")
+			e.state=read(child(animator,kind=="Zombie"and "AgroState"or "MoveState"),"Value","Unavailable")
+			local item=read(child(animator,"EquippedItem"),"Value","")
+			e.equipped=type(item)=="string"and item:match('"ItemName"%s*:%s*"([^"]+)"')or nil
+			local throttle=read(child(e.model,"Throttle"),"Value");local steer=read(child(e.model,"Steer"),"Value")
+			e.moving=(type(throttle)=="number"and math.abs(throttle)>.1)or(type(steer)=="number"and math.abs(steer)>.1)
+		end end
+	end
+end
+local function filterLoot(e)
+	if C.highValue and not e.high then return false end
+	local query=C.search:lower():match("^%s*(.-)%s*$")
+	if query~=""and not e.search:find(query,1,true)then return false end
+	if #C.categories>0 then
+		local found=false;for _,wanted in ipairs(C.categories)do for _,have in ipairs(e.categories)do if wanted==have then found=true end end end
+		if not found then return false end
+	end
+	return true
+end
+APP.filterLoot=filterLoot
+local function rank()
+	if not APP.ranking then
+		local cf=Drawing3D.GetCameraCFrame();local origin=read(APP.localRoot,"Position",cf and cf.Position)
+		if not origin then return end
+		APP.origin=origin;local pending={}
+		for kind,group in pairs(APP.groups)do if kind~="Zone"then for _,e in pairs(group)do pending[#pending+1]=e end end end
+		APP.ranking={entries=pending,at=1,origin=origin,lists={Zombie={},Character={},Vehicle={},Loot={},Zone={}}}
+	end
+	local r=APP.ranking;local chunk,parts={},{}
+	for i=r.at,math.min(#r.entries,r.at+127)do chunk[#chunk+1]=r.entries[i];parts[#parts+1]=r.entries[i].part end
+	r.at=r.at+#chunk
+	local ok,snapshot=pcall(entities.get_parts_snapshot,parts)
+	if ok then for i,e in ipairs(chunk)do
+		local pose=snapshot.parts[i]
+		if pose then
+			e.pos=pose.cframe.Position;e.distance=(e.pos-r.origin).Magnitude
+			local range=C[e.kind=="Loot"and "lootRange"or e.kind=="Zombie"and "zombieRange"or e.kind=="Vehicle"and "vehicleRange"or "characterRange"]
+			if e.distance<=range and (e.kind~="Loot"or filterLoot(e))then r.lists[e.kind][#r.lists[e.kind]+1]=e end
+		else APP.groups[e.kind][e.model]=nil end
+	end end
+	if r.at>#r.entries then
+		for _,list in pairs(r.lists)do table.sort(list,function(a,b)return a.distance<b.distance end)end
+		APP.nearby=r.lists;APP.ranking=nil
+		local name,distance="Wilderness",600
+		for model,z in pairs(APP.zones)do
+			local pos=read(z.part,"Position")
+			if not read(model,"Parent")or not pos then APP.zones[model]=nil
+			else local d=Vector3.new(pos.X-r.origin.X,0,pos.Z-r.origin.Z).Magnitude;if d<distance then name,distance=z.name,d end end
+		end
+		APP.zone=name;APP.zoneDistance=distance
+	end
+end
+local function short(v)return cleanText(tostring(v or "Unavailable"):sub(1,70))end
+local function infoBody()
+	local g=APP.guiValues;local lines={"Zone: "..short(APP.zone),"Health: "..short(APP.hp).." / "..short(APP.maxHp),
+		"Weapon: "..short(g.weapon),"Ammo: "..short(g.ammo).." / "..short(g.capacity),"Magazines: "..short(g.magazines).." | "..short(g.mode),
+		"Hotbar: "..table.concat(APP.hotbar or {}," / "),"FPS: "..short(g.fps).." | Ping: "..short(g.ping),"Server: "..short(g.region)}
+	for _,pair in ipairs({{"Zombie",C.panelZombies},{"Character",C.panelPlayers},{"Vehicle",C.panelVehicles},{"Loot",true}})do
+		if pair[2]then
+			lines[#lines+1]=pair[1].." nearby: "..#APP.nearby[pair[1]]
+			for i=1,math.min(3,#APP.nearby[pair[1]])do local e=APP.nearby[pair[1]][i];lines[#lines+1]=e.name.."  "..math.floor(e.distance).." studs"end
+		end
+	end
+	return table.concat(lines,"\n")
+end
+local mapRectMeta={}
+local function layoutRect(o,parent)
+	local meta=mapRectMeta[o]
+	if not meta then
+		meta={constraints=children(o)}
+		meta.absolute=read(o,"AbsolutePosition")~=nil and read(o,"AbsoluteSize")~=nil
+		mapRectMeta[o]=meta
+	end
+	local ap,az
+	if meta.absolute then ap,az=read(o,"AbsolutePosition"),read(o,"AbsoluteSize")end
+	if ap and az and az.X>0 and az.Y>0 then return {x=ap.X,y=ap.Y,w=az.X,h=az.Y}end
+	local size,position,anchor=read(o,"Size"),read(o,"Position"),read(o,"AnchorPoint",Vector2.zero)
+	if not size or not position then return nil end
+	local w,h=parent.w*size.X.Scale+size.X.Offset,parent.h*size.Y.Scale+size.Y.Offset
+	for _,constraint in ipairs(meta.constraints)do
+		if isa(constraint,"UISizeConstraint")then
+			local maximum=read(constraint,"MaxSize");if maximum then w=math.min(w,maximum.X);h=math.min(h,maximum.Y)end
+		elseif isa(constraint,"UIAspectRatioConstraint")then
+			local ratio=read(constraint,"AspectRatio",1);if ratio>0 then w=math.min(w,h*ratio);h=w/ratio end
+		end
+	end
+	return {x=parent.x+parent.w*position.X.Scale+position.X.Offset-w*anchor.X,
+		y=parent.y+parent.h*position.Y.Scale+position.Y.Offset-h*anchor.Y,w=w,h=h}
+end
+local function mapLayout(view)
+	local key=alignmentKey(view.X,view.Y)
+	if APP.mapAlignmentKey~=key then
+		APP.mapAlignmentKey=key
+		local saved=alignments[key]
+		if validAlignment(saved)then
+			C.mapOffsetX,C.mapOffsetY=saved.x,saved.y
+			C.mapSizeScale=type(saved.scale)=="number"and saved.scale>=.1 and saved.scale<=10 and saved.scale or 1
+			for _,flag in ipairs({"mapOffsetX","mapOffsetY"})do if APP.controls[flag]then APP.controls[flag]:SetValue(C[flag],true)end end
+		end
+	end
+	local nodes=APP.mapNodes
+	if not nodes or os.clock()-(nodes.at or 0)>.5 then
+		local gui=child(lp,"PlayerGui");local root=child(gui,"Map");local clip=child(root,"ClipBin");local drag=child(clip,"DragBin")
+		nodes={root=root,clip=clip,drag=drag,at=os.clock(),padding=children(root),marker=child(drag,"LocalMarker")};APP.mapNodes=nodes
+	end
+	local root,clip,drag=nodes.root,nodes.clip,nodes.drag
+	if not root or not clip or not drag then APP.mapOpen=false;APP.mapStatus="Original map unavailable";return end
+	-- Poll the authoritative value every frame when the external profile supports it.
+	local enabled=read(root,"Enabled");APP.mapStateVerified=type(enabled)=="boolean"
+	if APP.mapStateVerified then
+		if enabled and not APP.mapOpen and APP.Library then APP.Library:SetVisible(false)end
+		APP.mapOpen=enabled;APP.mapStateSource="Native Enabled (each frame)"
+	else APP.mapStateSource="M synchronization; native Enabled unavailable"end
+	local cp,cs=read(clip,"AbsolutePosition"),read(clip,"AbsoluteSize")
+	local dp,ds=read(drag,"AbsolutePosition"),read(drag,"AbsoluteSize")
+	if cp and cs and dp and ds and cs.X>0 and cs.Y>0 and ds.X>0 and ds.Y>0 then
+		-- Old margin/size calibration belongs to estimated layout, never native geometry.
+		APP.mapNative=true
+		local nativeKey=key..":native"
+		if APP.mapNativeKey~=nativeKey then
+			APP.mapNativeKey=nativeKey;local saved=alignments[nativeKey]
+			APP.mapGuiOffset=validAlignment(saved)and Vector2.new(saved.x,saved.y)or Vector2.zero
+		end
+		local offset=APP.mapGuiOffset or Vector2.zero
+		local c={x=cp.X+offset.X,y=cp.Y+offset.Y,w=cs.X,h=cs.Y}
+		local d={x=dp.X+offset.X,y=dp.Y+offset.Y,w=ds.X,h=ds.Y}
+		APP.mapClip=c;APP.mapCanvas=d;APP.mapMarker=nodes.marker
+		local mp,ms=read(nodes.marker,"AbsolutePosition"),read(nodes.marker,"AbsoluteSize")
+		local anchor=read(nodes.marker,"AnchorPoint")
+		APP.mapOwnPoint=mp and ms and anchor and mp+Vector2.new(ms.X*anchor.X,ms.Y*anchor.Y)+offset or nil
+		APP.mapStatus="Native map geometry; GUI-to-overlay offset "..offset.X..", "..offset.Y
+		return c,d
+	end
+	APP.mapNative=false;APP.mapOwnPoint=nil
+	local parent={x=0,y=0,w=view.X,h=view.Y}
+	for _,o in ipairs(nodes.padding)do if isa(o,"UIPadding")then
+		local top=read(o,"PaddingTop");local left=read(o,"PaddingLeft");local right=read(o,"PaddingRight");local bottom=read(o,"PaddingBottom")
+		local t=top and top.Scale*view.Y+top.Offset or 0;local l=left and left.Scale*view.X+left.Offset or 0
+		local r=right and right.Scale*view.X+right.Offset or 0;local b=bottom and bottom.Scale*view.Y+bottom.Offset or 0
+		parent={x=l,y=t,w=view.X-l-r,h=view.Y-t-b}
+	end end
+	local c=layoutRect(clip,parent);if not c then APP.mapStatus="Map layout unreadable";return end
+	-- Apply measured geometry before laying out children, so pan/zoom inherit the real size.
+	if not mapRectMeta[clip].absolute then
+		local anchor=read(clip,"AnchorPoint",Vector2.zero)
+		local w,h=c.w*C.mapSizeScale,c.h*C.mapSizeScale
+		c.x=c.x-(w-c.w)*anchor.X;c.y=c.y-(h-c.h)*anchor.Y;c.w=w;c.h=h
+	end
+	local d=layoutRect(drag,c);if not d then APP.mapStatus="Map drag layout unreadable";return end
+	c.x=c.x+C.mapOffsetX;c.y=c.y+C.mapOffsetY;d.x=d.x+C.mapOffsetX;d.y=d.y+C.mapOffsetY
+	APP.mapClip=c;APP.mapCanvas=d;APP.mapMarker=nodes.marker
+	APP.mapStatus="Original map layout active"
+	return c,d
+end
+local function mapPoint(position,canvas,transform)
+	local u=position.X*transform.sx+transform.bx;local v=position.Z*transform.sz+transform.bz
+	return Vector2.new(canvas.x+u*canvas.w,canvas.y+v*canvas.h)
+end
+APP.mapPoint=mapPoint
+local function mapCalibration()
+	local transform=mapTransforms[game.PlaceId]
+	if transform then return transform end
+	local marker=read(APP.mapMarker,"Position");local world=read(APP.localRoot,"Position")
+	if not marker or not world or not APP.mapOpen then return end
+	local sample={x=world.X,z=world.Z,u=marker.X.Scale,v=marker.Y.Scale}
+	local first=APP.mapFirstSample
+	if not first then APP.mapFirstSample=sample;APP.mapStatus="Move diagonally and reopen map to calibrate";return end
+	local dx,dz=sample.x-first.x,sample.z-first.z
+	if math.abs(dx)>20 and math.abs(dz)>20 then
+		local sx,sz=(sample.u-first.u)/dx,(sample.v-first.v)/dz
+		if math.abs(sx)>1/100000 and math.abs(sx)<=1/500 and math.abs(sz)>1/100000 and math.abs(sz)<=1/500 then
+			transform={sx=sx,sz=sz,bx=sample.u-sx*sample.x,bz=sample.v-sz*sample.z}
+			mapTransforms[game.PlaceId]=transform;APP.mapStatus="Original map projection calibrated";return transform
+		end
+	end
+end
+function APP.alignMapAt(cursor)
+	local canvas,clip,own=APP.mapCanvas,APP.mapClip,read(APP.mapMarker,"Position")
+	if not APP.mapOpen or not canvas or not clip or not own then return false end
+	if APP.mapNative and APP.mapOwnPoint then
+		APP.mapGuiOffset=(APP.mapGuiOffset or Vector2.zero)+cursor-APP.mapOwnPoint
+		alignments[APP.mapNativeKey]={x=APP.mapGuiOffset.X,y=APP.mapGuiOffset.Y}
+		APP.mapAlignmentSaved=saveAlignments()
+		print("[AR2_JOX] Native GUI-to-overlay correction: "..APP.mapGuiOffset.X..", "..APP.mapGuiOffset.Y)
+		return true
+	end
+	local x=canvas.x+own.X.Scale*canvas.w+own.X.Offset
+	local y=canvas.y+own.Y.Scale*canvas.h+own.Y.Offset
+	local q=Vector2.new((x-clip.x)/clip.w,(y-clip.y)/clip.h)
+	local drag=APP.mapNodes and APP.mapNodes.drag
+	local size,position=read(drag,"Size"),read(drag,"Position")
+	local signature=size and position and table.concat({size.X.Scale,size.X.Offset,size.Y.Scale,size.Y.Offset,
+		position.X.Scale,position.X.Offset,position.Y.Scale,position.Y.Offset},":")or ""
+	local first=APP.mapScreenSample
+	if first and first.key==APP.mapAlignmentKey and first.signature==signature then
+		local delta=Vector2.new((q.X-first.q.X)*clip.w,(q.Y-first.q.Y)*clip.h)
+		local actual=cursor-first.cursor
+		local denominator=delta.X*delta.X+delta.Y*delta.Y
+		if denominator>=1600 then
+			local factor=(delta.X*actual.X+delta.Y*actual.Y)/denominator
+			local residual=(actual-delta*factor).Magnitude
+			if factor>=.1 and factor<=10 and residual<=math.max(5,actual.Magnitude*.05)
+				and C.mapSizeScale*factor>=.1 and C.mapSizeScale*factor<=10 then
+				local w,h=clip.w*factor,clip.h*factor
+				local anchor=read(APP.mapNodes.clip,"AnchorPoint",Vector2.zero)
+				C.mapOffsetX=C.mapOffsetX+cursor.X-q.X*w-(clip.x-(w-clip.w)*anchor.X)
+				C.mapOffsetY=C.mapOffsetY+cursor.Y-q.Y*h-(clip.y-(h-clip.h)*anchor.Y)
+				C.mapSizeScale=C.mapSizeScale*factor
+				x,y=cursor.X,cursor.Y;APP.mapScaleCalibrated=true
+			end
+		end
+	end
+	APP.mapScreenSample={key=APP.mapAlignmentKey,signature=signature,q=q,cursor=cursor}
+	C.mapOffsetX=math.clamp(C.mapOffsetX+cursor.X-x,-500,500)
+	C.mapOffsetY=math.clamp(C.mapOffsetY+cursor.Y-y,-500,500)
+	for _,key in ipairs({"mapOffsetX","mapOffsetY"})do if APP.controls[key]then APP.controls[key]:SetValue(C[key],true)end end
+	if APP.mapAlignmentKey then alignments[APP.mapAlignmentKey]={x=C.mapOffsetX,y=C.mapOffsetY,scale=C.mapSizeScale};APP.mapAlignmentSaved=saveAlignments()end
+	print("[AR2_JOX] Map alignment: "..C.mapOffsetX..", "..C.mapOffsetY.." | scale: "..C.mapSizeScale)
+	return true
+end
+local function renderMap(view)
+	local clip,canvas=mapLayout(view)
+	if not C.mapEnabled or not APP.mapOpen or not clip then return end
+	local transform=mapCalibration();local own=read(APP.mapMarker,"Position")
+	-- Anchor all world positions to the replicated native local-marker coordinates.
+	local localPosition=read(APP.localRoot,"Position")
+	if transform and own and localPosition then
+		local u=APP.mapOwnPoint and(APP.mapOwnPoint.X-canvas.x)/canvas.w or own.X.Scale+own.X.Offset/canvas.w
+		local v=APP.mapOwnPoint and(APP.mapOwnPoint.Y-canvas.y)/canvas.h or own.Y.Scale+own.Y.Offset/canvas.h
+		transform={sx=transform.sx,sz=transform.sz,bx=u-localPosition.X*transform.sx,bz=v-localPosition.Z*transform.sz}
+	end
+	APP.mapTransform=transform
+	local left,top=math.max(0,clip.x),math.max(0,clip.y)
+	local right,bottom=math.min(view.X,clip.x+clip.w),math.min(view.Y,clip.y+clip.h)
+	if right<=left or bottom<=top then return end
+	immediate.push_clip(Vector2.new(left,top),Vector2.new(right,bottom))
+	local entries,parts={},{}
+	if transform then
+		for _,pair in ipairs({{"Character",C.mapPlayers},{"Vehicle",C.mapVehicles},{"Zombie",C.mapZombies}})do
+			if pair[2]then for _,e in pairs(APP.groups[pair[1]])do
+				if #entries<C.mapMaxDots then entries[#entries+1]=e;parts[#parts+1]=e.part end
+			end end
+		end
+		APP.mapObjects=#entries
+		for start=1,#parts,128 do
+			local chunk={};for i=start,math.min(#parts,start+127)do chunk[#chunk+1]=parts[i]end
+			local ok,poses=pcall(entities.get_parts_snapshot,chunk)
+			if ok then for j,pose in ipairs(poses.parts)do if pose then
+				local e=entries[start+j-1];local p=mapPoint(pose.cframe.Position,canvas,transform)
+				if p.X>=left and p.X<=right and p.Y>=top and p.Y<=bottom then
+					local color=e.kind=="Character"and C.playerColor or e.kind=="Vehicle"and C.vehicleColor or e.kind=="Zombie"and C.zombieColor or C.lootColor
+					immediate.circle(p,C.mapDotSize+1,true,false,Color3.new(0,0,0));immediate.circle(p,C.mapDotSize,true,false,color)
+					local labels=e.kind=="Character"and C.mapPlayerLabels or e.kind=="Vehicle"and C.mapVehicleLabels or e.kind=="Zombie"and C.mapZombieLabels
+					if labels then text(p+Vector2.new(C.mapDotSize+3,-8),e.kind=="Character"and playerLabel(e,C.mapUsername)or e.name,color,11)end
+				end
+			end end end
+		end
+	end
+	if own then
+		local p=APP.mapOwnPoint or Vector2.new(canvas.x+own.X.Scale*canvas.w+own.X.Offset,canvas.y+own.Y.Scale*canvas.h+own.Y.Offset)
+		immediate.circle(p,11,false,false,Color3.new(0,0,0))
+		immediate.circle(p,10,false,false,Color3.new(1,1,1))
+	end
+	immediate.pop_clip()
+	text(Vector2.new(left,math.max(0,top-22)),transform and("MAP ESP | Loaded objects: "..(APP.mapObjects or 0))or(APP.mapStatus or "Map calibration pending"),Color3.new(1,1,1),12)
+end
+local function predictPoint(origin,position,velocity,speed,gravity)
+	if speed<=0 then return position,0 end
+	local relative=position-origin
+	local a=velocity:Dot(velocity)-speed*speed;local b=2*relative:Dot(velocity);local c=relative:Dot(relative)
+	local t
+	if math.abs(a)<1e-6 then if math.abs(b)>1e-6 then t=-c/b end
+	else
+		local discriminant=b*b-4*a*c
+		if discriminant>=0 then
+			local root=math.sqrt(discriminant);local t1,t2=(-b-root)/(2*a),(-b+root)/(2*a)
+			if t1>0 then t=t1 end;if t2>0 and(not t or t2<t)then t=t2 end
+		end
+	end
+	if not t or t<0 or t>3 then return position,0 end
+	-- Gravity is weapon-specific; zero means no drop assumption.
+	return position+velocity*t+Vector3.new(0,.5*gravity*t*t,0),t
+end
+APP.predictPoint=predictPoint
+local function aimFrame(cf,view,focal)
+	local active=C.aimEnabled and not APP.mapOpen
+	local center=Vector2.new(view.X/2,view.Y/2)
+	if active and C.showFov then immediate.circle(center,C.fovRadius,false,false,APP.aimHeld and C.playerColor or C.fovColor)end
+	if not active then APP.aimTarget=nil;APP.aimStatus="Disabled / map open";return end
+	local now=os.clock();local dt=math.min(.1,now-(APP.aimFrameAt or now));APP.aimFrameAt=now
+	local candidates={}
+	for _,pair in ipairs({{"Character",C.aimPlayers},{"Zombie",C.aimZombies}})do if pair[2]then
+		for _,e in pairs(APP.groups[pair[1]])do
+			candidates[#candidates+1]=e
+		end
+	end end
+	table.sort(candidates,function(a,b)return(a.distance or math.huge)<(b.distance or math.huge)end)
+	local parts,actors={},{}
+	for i=1,math.min(64,#candidates)do
+		local e=candidates[i]
+		if read(e.part,"Parent")then
+			if now>=(e.aimMetadataAt or 0)then
+				local head=child(e.model,"Head");e.aimHead=head and isa(head,"BasePart")and head or e.part
+				e.aimHumanoid=child(e.model,"Humanoid");e.aimHealth=read(e.aimHumanoid,"Health");e.aimMetadataAt=now+.3
+			end
+			if not e.aimHealth or e.aimHealth>0 then actors[#actors+1]=e;parts[#parts+1]=e.aimHead;parts[#parts+1]=e.part end
+		end
+	end
+	local ok,snapshot=pcall(entities.get_parts_snapshot,parts)
+	if not ok then APP.aimStatus="Pose unavailable";return end
+	local best,score=nil,C.fovRadius*C.fovRadius
+	for i,e in ipairs(actors)do
+		local head,root=snapshot.parts[i*2-1],snapshot.parts[i*2]
+		if head and root then
+			local position=root.cframe.Position;local motion=e.aimMotion
+			if not motion then motion={position=position,at=now,velocity=Vector3.zero};e.aimMotion=motion
+			elseif now-motion.at>=.06 then
+				local elapsed=now-motion.at;local velocity=(position-motion.position)/elapsed
+				if elapsed<=.5 and velocity.Magnitude<=150 then motion.velocity=motion.velocity:Lerp(velocity,.5)else motion.velocity=Vector3.zero end
+				motion.position=position;motion.at=now
+			end
+			local world=head.cframe.Position
+			if (world-cf.Position).Magnitude<=C.aimRange then
+				if C.prediction then world=predictPoint(cf.Position,world,motion.velocity*(C.predictionStrength/100),C.bulletSpeed,C.bulletGravity)end
+				local q=cf:PointToObjectSpace(world);local depth=-q.Z
+				if depth>.05 then
+					local point=Vector2.new(view.X/2+q.X*focal/depth,view.Y/2-q.Y*focal/depth)
+					local delta=point-center;local distance=delta.X*delta.X+delta.Y*delta.Y
+					if point.X>=0 and point.Y>=0 and point.X<=view.X and point.Y<=view.Y and distance<score then
+						score=distance;best={entry=e,point=point,world=world}
+					end
+				end
+			end
+		end
+	end
+	APP.aimTarget=best and best.entry.name or nil
+	local okFocus,focused=pcall(input.is_window_focused)
+	local inputEnabled=true
+	if input.get_status then local okStatus,status=pcall(input.get_status);if okStatus and status then inputEnabled=status.enabled~=false end end
+	local menu=APP.Library and APP.Library.Visible
+	APP.aimStatus=menu and "Menu open"or not(okFocus and focused)and "Game unfocused"or not inputEnabled and "Input disabled"or not APP.aimHeld and "Hold aim bind"or not best and "No target in FOV"or "Tracking"
+	if APP.aimStatus=="Tracking"then
+		local factor=C.aimSmooth<=0 and 1 or 1-math.exp(-60*dt/C.aimSmooth)
+		local movement=(best.point-center)*factor
+		local moved,err=pcall(input.mouse_move_relative,movement)
+		if not moved then APP.aimStatus="Input unavailable";APP.aimError=cleanText(err)end
+	end
+end
+local suffixes={Character="Players",Zombie="Zombies",Vehicle="Vehicles"}
+local function effectEnabled(kind)
+	local suffix=suffixes[kind]
+	for _,effect in ipairs({"names","box","tracer","chams","health"})do if C[effect..suffix]then return true end end
+	return false
+end
+local function render()
+	if not running()then return end
+	local started=os.clock();local cf,view,focal=Drawing3D.GetCameraCFrame();if not cf then return end
+	renderMap(view)
+	local entries,parts={},{}
+	if C.esp and not APP.mapOpen then
+		local active={}
+		for _,kind in ipairs({"Character","Zombie","Vehicle"})do if effectEnabled(kind)then active[#active+1]=kind end end
+		local quota=math.max(1,math.floor(C.labels/math.max(1,#active)))
+		for _,kind in ipairs(active)do
+			local used=0
+			for _,e in ipairs(APP.nearby[kind])do
+				if used>=quota then break end
+				local q=e.pos and cf:PointToObjectSpace(e.pos)
+				if q and -q.Z>.05 then
+					local x,y=view.X/2+q.X*focal/-q.Z,view.Y/2-q.Y*focal/-q.Z
+					if x>=-60 and y>=-60 and x<view.X+60 and y<view.Y+60 then
+						entries[#entries+1]=e;parts[#parts+1]=e.part;used=used+1
+					end
+				end
+			end
+		end
+	end
+	local chamsGroups={Character={},Zombie={},Vehicle={}}
+	local chamsCount=0
+	local ok,snapshot=pcall(entities.get_parts_snapshot,parts)
+	if ok then for i,e in ipairs(entries)do
+		local pose=snapshot.parts[i]
+		if pose then
+			local q=cf:PointToObjectSpace(pose.cframe.Position);local depth=-q.Z
+			if depth>.05 then
+				local x,y=view.X/2+q.X*focal/depth,view.Y/2-q.Y*focal/depth
+				local suffix=suffixes[e.kind]
+				local col=e.kind=="Zombie"and C.zombieColor or e.kind=="Vehicle"and C.vehicleColor or C.playerColor
+				local height=e.kind=="Vehicle"and math.max(3,pose.size.Y)or 6
+				local width=e.kind=="Vehicle"and math.max(4,pose.size.X)or 3
+				local h,w=math.clamp(height*focal/depth,4,view.Y*2),math.clamp(width*focal/depth,3,view.X*2)
+				local left,right,top,bottom=x-w/2,x+w/2,y-h/2,y+h/2
+				if C["box"..suffix]then
+					if C.boxFilled then immediate.rectangle(Vector2.new(left,top),Vector2.new(right,bottom),0,true,false,Color4.new(col.R,col.G,col.B,.12))end
+					if C.boxCorners then
+						for _,corner in ipairs({{left,top,1,1},{right,top,-1,1},{left,bottom,1,-1},{right,bottom,-1,-1}})do
+							local p=Vector2.new(corner[1],corner[2]);immediate.line(p,p+Vector2.new(w*.25*corner[3],0),1,true,col)
+							immediate.line(p,p+Vector2.new(0,h*.25*corner[4]),1,true,col)
+						end
+					else immediate.rectangle(Vector2.new(left,top),Vector2.new(right,bottom),0,false,true,col)end
+				end
+				if C["names"..suffix]then
+					local label=e.kind=="Character"and playerLabel(e,false)or e.name
+					if C.distance then label=label.."  "..math.floor((pose.cframe.Position-(APP.origin or cf.Position)).Magnitude).." studs"end
+					local measured=immediate.calculate_text_size(label,fontAt(C.fontSize))
+					text(Vector2.new(x-measured.X/2,top-measured.Y-3),label,col)
+				end
+				if C["tracer"..suffix]then
+					local origin=C.tracerOrigin=="Center"and view.Y/2 or C.tracerOrigin=="Top"and 0 or view.Y
+					immediate.line(Vector2.new(view.X/2,origin),Vector2.new(x,bottom),1,true,col)
+				end
+				if C["health"..suffix]then
+					if os.clock()>=(e.espHealthAt or 0)then
+						local humanoid=child(e.model,"Humanoid");e.espHp=read(humanoid,"Health");e.espMaxHp=read(humanoid,"MaxHealth");e.espHealthAt=os.clock()+.2
+					end
+					if e.espHp and e.espMaxHp and e.espMaxHp>0 then
+						local amount=math.clamp(e.espHp/e.espMaxHp,0,1)
+						immediate.rectangle(Vector2.new(left-6,top),Vector2.new(left-3,bottom),0,true,false,Color3.new(0,0,0))
+						immediate.rectangle(Vector2.new(left-5,bottom-h*amount),Vector2.new(left-4,bottom),0,true,false,Color3.new(1-amount,amount,0))
+					end
+				end
+				if C["chams"..suffix]and chamsCount<32 then
+					if not e.chamsParts or os.clock()>=(e.chamsRefreshAt or 0)then
+						e.chamsParts={}
+						if e.kind~="Vehicle"then for _,part in ipairs(children(e.model))do
+							if isa(part,"BasePart")and part~=e.part and #e.chamsParts<16 then e.chamsParts[#e.chamsParts+1]=part end
+						end end
+						if #e.chamsParts==0 then e.chamsParts={e.part}end;e.chamsRefreshAt=os.clock()+2
+					end
+					chamsGroups[e.kind][#chamsGroups[e.kind]+1]={Root=e.part,Parts=e.chamsParts};chamsCount=chamsCount+1
+				end
+			end
+		end
+	end else APP.faults=APP.faults+1 end
+	if type(entities.draw_chams_batch)=="function"then for kind,actors in pairs(chamsGroups)do if #actors>0 then
+		local color=kind=="Zombie"and C.zombieColor or kind=="Vehicle"and C.vehicleColor or C.playerColor
+		local success,metrics=pcall(entities.draw_chams_batch,actors,{Color=color,Transparency=C.chamsOpacity/100,OutlineColor=color,OutlineTransparency=1,Thickness=1,Filled=true,Outlined=true})
+		if not success then APP.chamsError=cleanText(metrics)end
+	end end end
+	if C.combat and APP.combat then text(Vector2.new(view.X/2-90,45),"IN COMBAT  "..short(APP.guiValues.combatTime),Color3.fromRGB(255,90,90),14)end
+	if C.hud and not APP.mapOpen then text(Vector2.new(15,view.Y-38),"AR2 JoX | "..short(APP.zone).." | Players "..#APP.nearby.Character,C.playerColor,12)end
+	local okHeld,held=pcall(function()
+		if C.aimBind=="MB2"then return input.is_mouse_down(Enum.KeyCode.RightButton)
+		elseif C.aimBind=="MB1"then return input.is_mouse_down(Enum.KeyCode.LeftButton)
+		elseif C.aimBind=="MB3"then return input.is_mouse_down(Enum.KeyCode.MiddleButton)
+		elseif C.aimBind~="None"and Enum.KeyCode[C.aimBind]then return UIS:IsKeyDown(Enum.KeyCode[C.aimBind])end
+		return false
+	end)
+	APP.aimHeld=okHeld and held==true
+	aimFrame(cf,view,focal)
+	APP.poseMs=(os.clock()-started)*1000
+end
+APP.connections[#APP.connections+1]=RS.PreRender:Connect(function()local ok,err=pcall(render);if not ok then APP.lastError=tostring(err)end end)
+APP.connections[#APP.connections+1]=UIS.InputBegan:Connect(function(e)
+	if e.KeyCode.Name=="M"then
+		if not APP.mapStateVerified then APP.mapOpen=not APP.mapOpen end
+		if APP.mapOpen and APP.Library then APP.Library:SetVisible(false)end
+	elseif e.KeyCode.Name=="F7"then local ok,p=pcall(function()return UIS:GetMouseLocation()end);if ok then APP.alignMapAt(p)end
+	elseif e.KeyCode.Name=="End"then APP.stop()elseif e.KeyCode.Name=="F6"then C.esp=not C.esp;if APP.controls.esp then APP.controls.esp:SetValue(C.esp,true)end end
+end)
+-- Attach the published external UI last; failures retain core and hotkeys.
+local ok,lib=pcall(function()
+	local src=game:HttpGet("https://raw.githubusercontent.com/TrollLexBR/Jael-X/main/JoX-Library.lua")
+	local fn,err=loadstring(src,"@JoX-Library");assert(fn,err);return fn()
+end)
+if ok and type(lib)=="table"and lib.NewWindow then
+	APP.Library=lib;lib:SetToggleKey("RightControl")
+	local w=lib:NewWindow({title="Apocalypse Rising 2",subtitle="JoX / external information overlay",configId="ar2-jox",width=940,height=730});APP.window=w
+	local combat=w:NewTab("Combat");local mapTab=w:NewTab("Map");local visuals=w:NewTab("ESP");local status=w:NewTab("Status");local utilities=w:NewTab("Utilities")
+	local function toggle(section,key,label)
+		APP.controls[key]=section:AddToggle({text=label,flag=key,default=C[key],callback=function(v)C[key]=v end})
+	end
+	local function slider(section,key,label,lo,hi)
+		APP.controls[key]=section:AddSlider({text=label,flag=key,default=C[key],min=lo,max=hi,step=1,callback=function(v)C[key]=v end})
+	end
+	local m=mapTab:NewSection("Original game map","left")
+	local f=combat:NewSection("Aim FOV","left")
+	toggle(f,"aimEnabled","Enable aim assist");toggle(f,"showFov","Show FOV");slider(f,"fovRadius","FOV radius (pixels)",20,600)
+	toggle(f,"aimPlayers","Target characters");toggle(f,"aimZombies","Target zombies")
+	slider(f,"aimSmooth","Aim smoothing",0,30);slider(f,"aimRange","Aim range (studs)",100,5000)
+	APP.controls.aimBind=f:AddKeybind({text="Aim bind (hold)",flag="aimBind",default=C.aimBind,mode="Hold",onChanged=function(v)C.aimBind=v end})
+	APP.controls.fovColor=f:AddColorPicker({text="FOV color",flag="fovColor",default=C.fovColor,callback=function(v)C.fovColor=v end})
+	f:AddLabel({get=function()return APP.aimHeld and "Bind: held"or "Bind: released"end})
+	f:AddParagraph({text="Hold the bind to aim at the nearest projected head inside the FOV. Missing heads use the root. Zero smoothing snaps. Characters are not classified as enemies or allies; this version has no verified wall visibility filter."})
+	local p=combat:NewSection("Projectile prediction","right")
+	toggle(p,"prediction","Predict target movement")
+	slider(p,"predictionStrength","Movement prediction (%)",0,200)
+	slider(p,"bulletSpeed","Bullet speed (studs / second)",100,10000)
+	slider(p,"bulletGravity","Bullet gravity (studs / second squared)",0,500)
+	p:AddLabel({get=function()return "Aim: "..(APP.aimStatus or "Waiting")end})
+	p:AddLabel({get=function()return "Target: "..(APP.aimTarget or "None")end})
+	p:AddParagraph({text="Prediction estimates target velocity from fresh poses and solves travel time. Speed is a manual placeholder, not measured weapon data. Gravity zero adds no drop. Configure both for your weapon; prediction excludes drag and network latency."})
+	for _,a in ipairs({{"mapEnabled","Map ESP"},{"mapPlayers","Player dots"},{"mapVehicles","Vehicle dots"},{"mapZombies","Zombie dots"}})do toggle(m,a[1],a[2])end
+	local ml=mapTab:NewSection("Dot labels","left")
+	toggle(ml,"mapPlayerLabels","Player display names");toggle(ml,"mapUsername","Also show player @username")
+	toggle(ml,"mapVehicleLabels","Vehicle labels");toggle(ml,"mapZombieLabels","Zombie labels")
+	ml:AddParagraph({text="Player labels show the actual DisplayName when the replicated Player can be matched to its character. Username is an optional addition. Unknown identities fall back to the character model name."})
+	slider(m,"mapDotSize","Dot size",2,8);slider(m,"mapMaxDots","Maximum loaded dots",32,2000)
+	m:AddButton({text="Sync: original map is open",callback=function()APP.mapOpen=true;lib:SetVisible(false)end})
+	m:AddButton({text="Sync: original map is closed",callback=function()APP.mapOpen=false end})
+	local mc=mapTab:NewSection("Alignment","right")
+	slider(mc,"mapOffsetX","Horizontal alignment",-500,500);slider(mc,"mapOffsetY","Vertical alignment",-500,500)
+	mc:AddParagraph({text="Jael 1.31.12 reads the native map size and pointer tip every frame. Old size/margin calibration is ignored in native mode. F7 corrects only a remaining GUI-to-overlay coordinate offset. Older versions require two F7 samples after movement at the same zoom/pan."})
+	mc:AddLabel({get=function()return APP.mapStatus or "Open the game map with M"end})
+	mc:AddLabel({get=function()return APP.mapStateSource or "Map state: waiting for first frame"end})
+	mc:AddParagraph({text="Dots use the original map canvas and follow its zoom and drag. The white ring marks your native map-marker anchor. Only objects replicated to this client can be shown."})
+	mc:AddButton({text="Recalibrate this map",callback=function()mapTransforms[game.PlaceId]=nil;APP.mapFirstSample=nil end})
+	local v=visuals:NewSection("Names and distance","left")
+	toggle(v,"esp","Enable ESP")
+	for _,kind in ipairs({"Players","Zombies","Vehicles"})do toggle(v,"names"..kind,kind.." names")end
+	toggle(v,"distance","Distance labels");slider(v,"fontSize","Text size",9,20);slider(v,"labels","Maximum entities",8,128)
+	local boxes=visuals:NewSection("Boxes","right")
+	for _,kind in ipairs({"Players","Zombies","Vehicles"})do toggle(boxes,"box"..kind,kind.." boxes")end
+	toggle(boxes,"boxCorners","Corner boxes");toggle(boxes,"boxFilled","Filled boxes")
+	local tracers=visuals:NewSection("Tracers","left")
+	for _,kind in ipairs({"Players","Zombies","Vehicles"})do toggle(tracers,"tracer"..kind,kind.." tracers")end
+	APP.controls.tracerOrigin=tracers:AddDropdown({text="Tracer origin",flag="tracerOrigin",options={"Bottom","Center","Top"},default=C.tracerOrigin,callback=function(v)C.tracerOrigin=v end})
+	local chams=visuals:NewSection("Chams","right")
+	for _,kind in ipairs({"Players","Zombies","Vehicles"})do toggle(chams,"chams"..kind,kind.." chams")end
+	slider(chams,"chamsOpacity","Chams opacity (%)",5,90)
+	chams:AddParagraph({text="Native body-part silhouettes, up to 32 actors and 16 parts each. They do not test engine depth. Vehicles use their anchor volume."})
+	local hp=visuals:NewSection("Health bars","left")
+	for _,kind in ipairs({"Players","Zombies"})do toggle(hp,"health"..kind,kind.." health bars")end
+	local r=visuals:NewSection("Range and colors","right")
+	for _,a in ipairs({{"zombieRange","Zombie range"},{"vehicleRange","Vehicle range"},{"characterRange","Player range"}})do slider(r,a[1],a[2],50,3000)end
+	for _,a in ipairs({{"zombieColor","Zombies"},{"vehicleColor","Vehicles"},{"playerColor","Players"}})do
+		local key=a[1];APP.controls[key]=r:AddColorPicker({text=a[2],flag=key,default=C[key],callback=function(value)C[key]=value end})
+	end
+	local st=status:NewSection("Character and server","left")
+	st:AddLabel({get=function()return "Zone: "..short(APP.zone)end})
+	st:AddLabel({get=function()return "Health: "..short(APP.hp).." / "..short(APP.maxHp)end})
+	for _,pair in ipairs({{"weapon","Weapon"},{"ammo","Ammo"},{"capacity","Capacity"},{"magazines","Magazines"},{"mode","Fire mode"},{"slot","Equipped slot"},{"fps","FPS"},{"ping","Ping"},{"region","Server"}})do
+		local key,label=pair[1],pair[2];st:AddLabel({get=function()return label..": "..short(APP.guiValues[key])end})
+	end
+	st:AddLabel({get=function()return "Hotbar: "..table.concat(APP.hotbar or {}," / ")end})
+	local nb=status:NewSection("Nearest objects","right")
+	for _,kind in ipairs({"Zombie","Character","Vehicle"})do
+		local k=kind
+		nb:AddLabel({get=function()return k..": "..#APP.nearby[k]end})
+		for index=1,3 do local i=index;nb:AddLabel({get=function()
+			local enabled=k=="Zombie"and C.panelZombies or k=="Character"and C.panelPlayers or k=="Vehicle"and C.panelVehicles or k=="Loot"
+			local e=enabled and APP.nearby[k][i]
+			return e and(e.name.."  "..math.floor(e.distance).." studs"..(e.equipped and(" | "..e.equipped)or ""))or "-"
+		end})end
+	end
+	local u=utilities:NewSection("Information HUD","left")
+	for _,a in ipairs({{"hud","Status HUD"},{"combat","Combat warning"},{"panelZombies","Nearest zombies"},{"panelPlayers","Nearest characters"},{"panelVehicles","Nearest vehicles"}})do toggle(u,a[1],a[2])end
+	local d=utilities:NewSection("Runtime","right")
+	d:AddLabel({get=function()return string.format("ESP callback: %.2f ms | Read faults: %d",APP.poseMs,APP.faults)end})
+	d:AddParagraph({text="RightControl toggles the menu. F6 toggles ESP. End unloads. GUI-derived fields show Unavailable when the exact game profile cannot read them."})
+	d:AddButton({text="Unload script",style="danger",callback=APP.stop})
+else warn("[AR2_JOX] JoX UI unavailable; core remains active: "..tostring(lib))end
+if APP.window then
+	local restored,raw=pcall(function()return buffer.tostring(fs.read_async(autoConfigPath))end)
+	if restored then local okRestore,err=pcall(function()APP.window:ImportConfig(raw)end);if not okRestore then APP.configSaveError=cleanText(err)end end
+	APP.saveConfig()
+end
+if APP.mapOpen and APP.Library then APP.Library:SetVisible(false)end
+local due={membership=0,vehicle=0,info=0,rank=0,save=0}
+print("[AR2_JOX] Loaded; RightControl menu, F6 ESP, End unload")
+while running()do
+	if not supported()then APP.stop();break end
+	local ok,err=pcall(function()
+		local now=os.clock()
+		if now>=due.save then APP.saveConfig();due.save=now+.75 end
+		if now>=due.membership then
+			roster("Zombie",child(workspace,"Zombies"));roster("Character",child(workspace,"Characters"));due.membership=now+1
+		end
+		if now>=due.vehicle then roster("Vehicle",child(workspace,"Vehicles"));due.vehicle=now+3 end
+		if APP.rescan and not APP.scan then APP.nextWorld=0;APP.rescan=false end
+		if not APP.scan and now>=(APP.nextWorld or 0)then beginScan()end
+		worldStep();resolveJobs()
+		if now>=due.info then refreshInfo();due.info=now+.5 end
+		if APP.ranking or now>=due.rank then rank();if not APP.ranking then due.rank=now+.25 end end
+	end)
+	if not ok then APP.lastError=tostring(err);APP.faults=APP.faults+1 end
+	task.wait(.04)
+end
