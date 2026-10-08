@@ -75,6 +75,7 @@ for cycle=1,2 do
 		local app=assert(shared.PF_ASSIST);assert(app.Library and app.window,"Real JoX UI failed")
 		local list=assert(app.entityList);assert(list.Count==2 and list.LastError==nil)
 		local entry=assert(app.visuals[enemy.model]).entry
+		local originalChams=entry.Features.Chams
 		assert(entry.Features.Chams.Kind=="Chams" and entry.Features.Box.Kind=="Box")
 		assert(entry.Health==60 and entry.Active and not app.visuals[ally.model].entry.Active)
 		assert(entry.PoseNames.Head.Size.X>1,"PF tiny part dimensions must be corrected")
@@ -92,6 +93,7 @@ for cycle=1,2 do
 		assert(entry.Features.Skeleton.Options.Enabled and #entry.Features.Skeleton.Options.Connections==5)
 		assert(entry.Features.Tracer.Options.Origin=="Mouse" and entry.Features.Tracer.Options.Target=="Top")
 		assert(entry.Features.Chams.Options.Style=="Wireframe" and entry.Features.Box.Options.Style=="Dashed")
+		assert(entry.Features.Chams==originalChams,"Style edits should update handles instead of recreating them")
 		assert(entry.Features.Chams.Options.Color(entry)==app.config.chamsColor)
 		assert(app.visuals[ally.model].entry.Active,"Ally toggle did not update list filter")
 		enemy.healthFrame.Visible=false;task.wait(.16);assert(entry.Health==nil,"Hidden HP was fabricated")
@@ -136,3 +138,72 @@ assert(realLoadfile(${JSON.stringify(script)}))()
 	const frames = events.filter(e => e.type === 'drawing-frame');
 	assert(frames.some(frame => frame.commands.filter(c => c.kind === 'silhouette').length === 60));
 });
+
+test('information-only ESP reduces 60 bodies from 360 pose reads/volumes to 120 reads/60 volumes; disabled ESP does no pose/projection work', () => {
+	const events=run(setup+`
+models={}
+for i=1,60 do models[i]=makeCharacter("Player "..i,(i%10)-5,Color3.fromRGB(255,10,20)).model end
+local projectCount,lastVolumes=0,0;local realProject=Drawing3D.ProjectVolumes
+Drawing3D.ProjectVolumes=function(volumes)projectCount=projectCount+1;lastVolumes=#volumes;return realProject(volumes)end
+task.spawn(function()
+	task.wait(.12);local app=assert(shared.PF_ASSIST)
+	assert(app.stats.poseParts==360 and lastVolumes==6)
+	app.controls.chams:SetValue(false);task.wait(.1)
+	assert(app.stats.poseParts==120,"Information ESP should only read head/torso")
+	assert(lastVolumes==1,"Information ESP should project a single body bound")
+	for _,v in pairs(app.visuals)do assert(v.entry.Active and v.entry.PoseNames.Body)end
+	app.controls.esp:SetValue(false);task.wait(.05)
+	local beforeBatch,beforeProjection=batchCalls,projectCount;task.wait(.1)
+	assert(app.stats.poseParts==0 and batchCalls==beforeBatch and projectCount==beforeProjection,"Disabled ESP still did pose/projection work")
+	print("[PF_PERF_TEST] 60 players: 360 -> 120 requested poses, 360 -> 60 projected volumes; disabled ESP: zero pose/projection work")
+	app.stop()
+end)
+assert(realLoadfile(${JSON.stringify(script)}))()
+`);
+	assert(events.some(e=>e.text?.startsWith('[PF_PERF_TEST]')));
+});
+
+test('full hub selects head-top and arm-only peek points through its actual visibility worker without sending input',()=>run(setup+`
+models={enemy.model}
+json=realGame:GetService("HttpService"):JSONEncode({aim=true,wallCheck=true,visibilityColors=true,rosterRate=.2})
+local mode="head"
+local map={Parent=true,FindFirstChild=function()return nil end,GetChildren=function()return {}end,GetDescendants=function()return {}end}
+workspace.FindFirstChild=function(_,name)if name=="Players"then return folder elseif name=="Map"then return map end end
+raycast={cast=function(root,from,direction)
+	assert(root==map)
+	local t=(-12.5-from.Z)/direction.Z;local intersection=from+direction*t
+	local blocked=mode=="head" and intersection.Y<=.8 or mode=="arm" and intersection.X<=-.5
+	local hit;if blocked then hit={Distance=direction.Magnitude*t}end
+	return hit,{Complete=true,Skipped=0,Truncated=false,Parts=1,AgeMs=0}
+end}
+task.spawn(function()
+	task.wait(.2);local app=assert(shared.PF_ASSIST)
+	assert(app.stats.targetPart=="Head" and app.stats.aimPoint.Y>1.5,"Head-top peek was not selected by full hub")
+	mode="arm";app.controls.surfacePoints:SetValue(false);app.controls.surfacePoints:SetValue(true)
+	task.wait(.3)
+	assert(app.stats.targetPart=="Limb4" and app.stats.aimPoint.X>-1,"Arm-only peek was not selected by full hub")
+	assert(not app.stats.mouseCalls,"Fixture sent input while unfocused")
+	app.stop()
+end)
+assert(realLoadfile(${JSON.stringify(script)}))()
+`));
+
+test('one visible character among 60 avoids detailed limb reads and volume projection for off-screen bodies',()=>run(setup+`
+models={enemy.model}
+for i=2,60 do
+	local character=makeCharacter("Behind "..i,0,Color3.fromRGB(255,10,20))
+	for _,part in ipairs(character.parts)do part.CFrame=CFrame.new(part.CFrame.Position.X,part.CFrame.Position.Y,25)end
+	models[i]=character.model
+end
+local projected=0;local realProject=Drawing3D.ProjectVolumes
+Drawing3D.ProjectVolumes=function(parts)projected=projected+1;return realProject(parts)end
+local reset=RS.PreRender:Connect(function()projected=0 end)
+task.spawn(function()
+	task.wait(.14);local app=assert(shared.PF_ASSIST)
+	assert(app.stats.poseParts==124,"Behind-camera players still requested all limb poses")
+	assert(projected==1,"Behind-camera players still projected body volumes")
+	local active=0;for _,v in pairs(app.visuals)do if v.entry.Active then active=active+1 end end
+	assert(active==1);app.stop();reset:Disconnect()
+end)
+assert(realLoadfile(${JSON.stringify(script)}))()
+`));

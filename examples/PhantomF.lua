@@ -58,6 +58,8 @@ local CFG = {
 
 	aim = true, chams = true, nametags = true, teamCheck = true, showFov = true,
 	wallCheck = true, visibilityColors = true, lightweight = true,
+	adaptiveParts = true, surfacePoints = true,
+	fastInfoESP = true,
 	visibleColor = Color3.fromRGB(80, 235, 135),
 	blockedColor = Color3.fromRGB(255, 70, 90),
 	unknownColor = Color3.fromRGB(150, 150, 160),
@@ -551,9 +553,10 @@ local function pointVisibility(origin, destination)
 	end
 	return clear
 end
-local function cachedVisibility(key,origin,destination,now)
+local function cachedVisibility(key,origin,destination,now,partName)
 	local entry=visibilityEntries[key]
 	if not entry or not entry.origin or not entry.point then return nil,nil end
+	if partName and entry.partName~=partName then return nil,false end
 	local color;if now-entry.confirmedAt<=3 then color=entry.clear end
 	-- Keep visual feedback separate from aim authorization. A stale green color
 	-- cannot authorize aim after the camera or the target has moved.
@@ -562,35 +565,168 @@ local function cachedVisibility(key,origin,destination,now)
 	local aimClear=fresh and entry.clear==true
 	return color,aimClear
 end
-local function sampleVisibility(request)
+-- Part-specific samples prevent a clear head ray from authorizing a blocked arm.
+local function bodyCandidates(request)
+	if request.candidates then return request.candidates end
+	local candidates={}
+	local names={};local preferred=CFG.targetPart or "Head"
+	if request.poses[preferred] then names[#names+1]=preferred end
+	for _,name in ipairs(request.names)do if name~=preferred and request.poses[name] then names[#names+1]=name end end
+	for _,name in ipairs(names)do
+		local pose=request.poses[name];local size=pose.Size
+		local offsets={Vector3.zero}
+		if CFG.surfacePoints then
+			-- Stay inside the approximate volume rather than probing outside the body.
+			offsets={Vector3.zero,Vector3.new(0,size.Y*.35,0),Vector3.new(size.X*.35,0,0),
+				Vector3.new(-size.X*.35,0,0),Vector3.new(0,-size.Y*.35,0),
+				Vector3.new(0,0,size.Z*.35),Vector3.new(0,0,-size.Z*.35)}
+		end
+		for index,offset in ipairs(offsets)do
+			candidates[#candidates+1]={id=name..":"..index,partName=name,offset=offset,
+				point=pose.CFrame:PointToWorldSpace(offset)}
+		end
+	end
+	request.candidates=candidates;return candidates
+end
+local function bodySampleDue(sample,candidate,request,now,interval)
+	return not sample or now-sample.checkedAt>=interval or not sample.origin or not sample.point
+		or (request.origin-sample.origin).Magnitude>.25 or (candidate.point-sample.point).Magnitude>.15
+end
+local function nextBodyCandidate(request,entry,now,interval)
+	local candidates=bodyCandidates(request)
+	if #candidates==0 then return nil end
+	-- Refresh the currently useful clear point while continuing to explore blocked/unknown parts.
+	for _,candidate in ipairs(candidates)do
+		local sample=entry.samples[candidate.id]
+		if sample and sample.clear==true and sample.latestKnown and now-sample.checkedAt<=.2 then
+			if bodySampleDue(sample,candidate,request,now,.04)then return candidate end
+			break
+		end
+	end
+	for visited=1,#candidates do
+		entry.cursor=(entry.cursor or 0)%#candidates+1
+		local candidate=candidates[entry.cursor]
+		if bodySampleDue(entry.samples[candidate.id],candidate,request,now,interval)then return candidate end
+	end
+end
+local function bodyVisibility(e,origin,center,now,wantTarget)
+	local entry=visibilityEntries[e.key]
+	if not entry or not entry.samples then return nil,nil end
+	local display,confirmed,expected=nil,0,0
+	for _,name in ipairs(e.partNames)do if e.poseNames[name]then expected=expected+(CFG.surfacePoints and 7 or 1)end end
+	for _,sample in pairs(entry.samples)do
+		local allowed=CFG.surfacePoints or sample.offset.Magnitude<1e-6
+		if allowed and e.poseNames[sample.partName]and now-sample.confirmedAt<=3 then
+			confirmed=confirmed+1;if sample.clear==true then display=true end
+		end
+	end
+	if display~=true and expected>0 and confirmed==expected then display=false end
+	if wantTarget==false then return display,nil end
+	local function target(sample)
+		if not sample or not sample.latestKnown or sample.clear~=true or now-sample.checkedAt>.2 then return nil end
+		local pose=e.poseNames[sample.partName];if not pose then return nil end
+		local point=pose.CFrame:PointToWorldSpace(sample.offset)
+		if (origin-sample.origin).Magnitude>.25 or (point-sample.point).Magnitude>.15 then return nil end
+		local distance=(point-origin).Magnitude;if distance<4 or distance>CFG.maxDistance then return nil end
+		local screen,on=Drawing3D.WorldToViewportPoint(point)
+		APP.stats.visibilityPointProjections=(APP.stats.visibilityPointProjections or 0)+1
+		local delta=(Vector2.new(screen.X,screen.Y)-center).Magnitude
+		if not on or screen.Z<=0 or delta>CFG.fov then return nil end
+		return {point=screen,worldPoint=point,partName=sample.partName,distance=distance,delta=delta}
+	end
+	-- A fresh clear center wins immediately. Only search that part's edge points
+	-- when its center is covered, then fall back to another part. Fully exposed
+	-- players no longer project all 42 visibility probes every render frame.
+	local names,used={},{}
+	for _,name in ipairs({CFG.targetPart or "Head","Head","Torso"})do
+		if not used[name]then used[name]=true;names[#names+1]=name end
+	end
+	for _,name in ipairs(e.partNames)do if not used[name]then names[#names+1]=name end end
+	for _,name in ipairs(names)do if e.poseNames[name]then
+		local aim=target(entry.samples[name..":1"])
+		if aim then return display,aim end
+		local best,bestDelta=nil,math.huge
+		if CFG.surfacePoints then
+			for index=2,7 do local candidate=target(entry.samples[name..":"..index])
+				if candidate and candidate.delta<bestDelta then best,bestDelta=candidate,candidate.delta end
+			end
+		end
+		if best then return display,best end
+	end end
+	return display,nil
+end
+local function sampleVisibility(request,interval)
+	if request.poses then
+		local entry=visibilityEntries[request.key]
+		if not entry or not entry.samples then entry={samples={},cursor=0}end
+		local candidate=nextBodyCandidate(request,entry,os.clock(),interval or .08)
+		if not candidate then return false end
+		local clear=pointVisibility(request.origin,candidate.point)
+		local sample=entry.samples[candidate.id]or {confirmedAt=-math.huge}
+		sample.checkedAt=os.clock();sample.latestKnown=clear~=nil
+		sample.partName,sample.offset=candidate.partName,candidate.offset
+		if clear~=nil then sample.clear=clear;sample.confirmedAt=sample.checkedAt
+			sample.origin,sample.point=request.origin,candidate.point end
+		entry.samples[candidate.id]=sample;entry.checkedAt=sample.checkedAt
+		visibilityEntries[request.key]=entry
+		return true
+	end
 	local clear=pointVisibility(request.origin,request.point)
 	local entry=visibilityEntries[request.key]or {confirmedAt=-math.huge}
+	if entry.samples then entry={confirmedAt=-math.huge}end
 	entry.checkedAt=os.clock();entry.latestKnown=clear~=nil
+	entry.partName=request.partName
 	if clear~=nil then entry.clear=clear;entry.confirmedAt=entry.checkedAt
 		entry.origin,entry.point=request.origin,request.point end
 	visibilityEntries[request.key]=entry
 end
 -- Advance the fair queue only for requests actually visited. A priority sample
 -- must not consume an unseen player's slot (even-sized rosters used to starve).
+local bodyPriorityTurn=false
 local function updateVisibilityBatch(requests,priority,cursor,maxCount,budget)
 	if #requests==0 then return 0 end
 	local started,count,visited=os.clock(),0,0
 	local refresh=CFG.lightweight and .08 or .05
 	local function due(request,interval)
 		local entry=visibilityEntries[request.key]
+		if request.poses then
+			for _,candidate in ipairs(bodyCandidates(request))do
+				if bodySampleDue(entry and entry.samples and entry.samples[candidate.id],candidate,request,started,interval)then return true end
+			end
+			return false
+		end
 		return not entry or started-entry.checkedAt>=interval
 	end
-	local function sample(request)
-		local ok,err=pcall(sampleVisibility,request)
+	local function sample(request,interval)
+		local ok,err=pcall(sampleVisibility,request,interval)
 		if not ok then report(err)end
 		count=count+1
 	end
-	if priority and due(priority,.04)then sample(priority)end
+	-- Reserve fair work before a multi-point priority bundle. An expensive target
+	-- must not consume every batch forever and starve the rest of the roster.
+	local priorityFirst=false
+	if priority and priority.poses and #requests>1 then
+		priorityFirst=bodyPriorityTurn;bodyPriorityTurn=not bodyPriorityTurn
+	end
+	if priority and priority.poses and #requests>1 and not priorityFirst then
+		while visited<#requests and count==0 do
+			cursor=cursor%#requests+1;visited=visited+1
+			local request=requests[cursor]
+			if request.key~=priority.key and due(request,refresh)then sample(request,refresh)end
+		end
+	end
+	if priority then
+		local limit=priority.poses and math.max(1,maxCount-2)or 1
+		for index=1,limit do
+			if count>=maxCount or (count>0 and os.clock()-started>=budget)or not due(priority,.04)then break end
+			sample(priority,.04)
+		end
+	end
 	while visited<#requests and count<maxCount do
 		if count>0 and os.clock()-started>=budget then break end
 		cursor=cursor%#requests+1;visited=visited+1
 		local request=requests[cursor]
-		if (not priority or request.key~=priority.key)and due(request,refresh)then sample(request)end
+		if (not priority or request.key~=priority.key)and due(request,refresh)then sample(request,refresh)end
 	end
 	APP.stats.rayBatchQueries=count
 	APP.stats.rayBatchMs=(os.clock()-started)*1000
@@ -623,25 +759,29 @@ local colorCallbacks={}
 for _, kind in ipairs({"chams","box","skeleton","tracer","name"}) do
 	colorCallbacks[kind]=function(entity)return featureColor(kind,entity)end
 end
+local function updateFeature(v,kind,options)
+	v.features=v.features or {}
+	if v.features[kind]then v.features[kind]:Update(options)
+	else v.features[kind]=v.entry["Add"..kind](v.entry,options)end
+end
 local function configureFeatures(v)
-	local entry=v.entry
-	entry:AddChams({Enabled=CFG.chams,Style=CFG.chamsStyle,Color=colorCallbacks.chams,
+	updateFeature(v,"Chams",{Enabled=CFG.chams,Style=CFG.chamsStyle,Color=colorCallbacks.chams,
 		Transparency=CFG.opacity,Filled=CFG.filledChams,Outline=CFG.chamsOutline,
 		OutlineColor=CFG.chamsOutlineColor,OutlineTransparency=CFG.chamsOutlineOpacity,Thickness=CFG.chamsThickness})
-	entry:AddBox({Enabled=CFG.box2d,Style=CFG.boxStyle=="Corners" and "Corner" or CFG.boxStyle=="Full box" and "Full" or CFG.boxStyle,
+	updateFeature(v,"Box",{Enabled=CFG.box2d,Style=CFG.boxStyle=="Corners" and "Corner" or CFG.boxStyle=="Full box" and "Full" or CFG.boxStyle,
 		Color=colorCallbacks.box,Transparency=CFG.boxOpacity,Thickness=CFG.boxThickness,
 		Border=CFG.boxBorder,BorderColor=CFG.boxBorderColor,BorderTransparency=CFG.boxBorderOpacity,BorderThickness=CFG.boxBorderThickness,
 		Filled=CFG.boxFilled,FillColor=CFG.boxFillColor,FillTransparency=CFG.boxFillOpacity,
 		CornerLength=CFG.boxCornerLength,DashLength=CFG.boxDashLength,GapLength=CFG.boxGapLength})
-	entry:AddSkeleton({Enabled=CFG.skeleton,Color=colorCallbacks.skeleton,Transparency=CFG.skeletonOpacity,
+	updateFeature(v,"Skeleton",{Enabled=CFG.skeleton,Color=colorCallbacks.skeleton,Transparency=CFG.skeletonOpacity,
 		Thickness=CFG.skeletonThickness,Border=CFG.skeletonBorder,BorderColor=CFG.skeletonBorderColor,
 		BorderTransparency=CFG.skeletonBorderOpacity,BorderThickness=CFG.skeletonBorderThickness,Connections=v.entity.links})
-	entry:AddTracer({Enabled=CFG.tracers,Origin=CFG.tracerOrigin,Target=CFG.tracerTarget,
+	updateFeature(v,"Tracer",{Enabled=CFG.tracers,Origin=CFG.tracerOrigin,Target=CFG.tracerTarget,
 		Color=colorCallbacks.tracer,Transparency=CFG.tracerOpacity,Thickness=CFG.tracerThickness,
 		Border=CFG.tracerBorder,BorderColor=CFG.tracerBorderColor,BorderTransparency=CFG.tracerBorderOpacity,BorderThickness=CFG.tracerBorderThickness})
-	entry:AddNameTag({Enabled=CFG.nametags or CFG.nameDistance,Color=colorCallbacks.name,Transparency=CFG.nameOpacity,
+	updateFeature(v,"NameTag",{Enabled=CFG.nametags or CFG.nameDistance,Color=colorCallbacks.name,Transparency=CFG.nameOpacity,
 		Size=CFG.nameSize,Font=CFG.nameFont,Outline=CFG.nameOutline,Offset=CFG.nameOffset,ShowDistance=false})
-	entry:AddHealthBar({Enabled=CFG.healthBars,Color=CFG.healthColor,Transparency=CFG.healthOpacity,
+	updateFeature(v,"HealthBar",{Enabled=CFG.healthBars,Color=CFG.healthColor,Transparency=CFG.healthOpacity,
 		BackgroundColor=CFG.healthBackgroundColor,BackgroundTransparency=CFG.healthBackgroundOpacity,
 		Thickness=CFG.healthThickness,Offset=CFG.healthOffset,Side=CFG.healthSide,ShowText=CFG.healthText})
 	v.styleRevision=APP.styleRevision
@@ -659,7 +799,11 @@ attachEntity=function(e)
 		if e.torso and part~=e.torso then e.links[#e.links+1]={"Torso",name} end
 	end
 	v={entity=e,draw=false}
-	local descriptor={Name=e.name or "Player",Parts=function()return v.draw and e.poses or {}end}
+	local descriptor={Name=e.name or "Player",Parts=function()
+		if not v.draw then return {}end
+		if CFG.fastInfoESP and not CFG.chams and not CFG.skeleton then return e.infoBounds or {}end
+		return e.poses
+	end}
 	v.descriptor=descriptor
 	v.entry=APP.entityList:Add(descriptor,{Adapter=v})
 	APP.visuals[e.key]=v
@@ -668,14 +812,28 @@ attachEntity=function(e)
 end
 local function refreshPoses()
 	local requested,owners={},{}
+	local needESP=CFG.esp and (CFG.chams or CFG.skeleton or CFG.box2d or CFG.nametags or CFG.nameDistance or CFG.healthBars or CFG.tracers)
+	local now=os.clock()
 	for _,e in ipairs(roster) do
-		e.poses={};e.poseNames={}
+		e.poses={};e.poseNames={};e.infoBounds={}
+		local enemy,hp,present=metadata(e,now)
+		local eligible=present and enemy~=nil and (hp==nil or hp>0)
+		local forESP=needESP and (enemy or CFG.showAllies)
+		local forAim=CFG.aim and (enemy or not CFG.teamCheck)
+		local detailed=forESP and e.espNearby~=false and (CFG.chams or CFG.skeleton or not CFG.fastInfoESP)
+			or forAim and CFG.wallCheck and CFG.adaptiveParts and e.aimNearby~=false
 		for i,part in ipairs(e.partNames and e.parts or {}) do
-			if #requested<4096 then requested[#requested+1]=part;owners[#owners+1]={e,i} end
+			if eligible and (forESP or forAim)and (detailed or part==e.head or part==e.torso)and #requested<4096 then
+				requested[#requested+1]=part;owners[#owners+1]={e,i}
+			end
 		end
 	end
+	APP.stats.poseParts=#requested
+	APP.stats.poseReadMs=0
 	if #requested==0 then return end
+	local started=os.clock()
 	local ok,snapshot=pcall(entities.get_parts_snapshot,requested)
+	APP.stats.poseReadMs=(os.clock()-started)*1000
 	if not ok then report(snapshot);return end
 	for i,owner in ipairs(owners) do
 		local pose=snapshot.parts[i]
@@ -685,15 +843,29 @@ local function refreshPoses()
 			e.poses[#e.poses+1]=part;e.poseNames[part.Name]=part
 		end
 	end
-	APP.stats.poseParts=#requested
+	if CFG.fastInfoESP and not CFG.chams and not CFG.skeleton then
+		for _,e in ipairs(roster)do
+			local torso=e.poseNames.Torso;local head=e.poseNames.Head
+			local pose=torso or head
+			if pose then
+				e.infoBounds={{Name="Body",CFrame=torso and pose.CFrame or pose.CFrame*CFrame.new(0,-2,0),Size=Vector3.new(3.7,5.5,1.5)}}
+			end
+		end
+	end
 end
 local function renderEntity(state, selected)
 	local e=state.e;local v=APP.visuals[e.key]
 	if not v then return end
-	v.draw=true;v.color=visibilityColor(state,selected)
+	v.draw=CFG.esp and e.espNearby~=false and (CFG.chams or CFG.skeleton or CFG.box2d or CFG.nametags or CFG.nameDistance or CFG.tracers or CFG.healthBars and state.hp~=nil)
+	if not v.draw then return end
+	v.color=visibilityColor(state,selected)
 	if v.styleRevision~=APP.styleRevision then configureFeatures(v) end
-	v.descriptor.Name=(CFG.nametags and (e.name or (state.enemy and "Enemy" or "Ally")) or "")
-		..(CFG.nameDistance and string.format(" [%d studs]",math.floor(state.distance)) or "")
+	local labelName=CFG.nametags and (e.name or (state.enemy and "Enemy" or "Ally"))or ""
+	local labelDistance=CFG.nameDistance and math.floor(state.distance)or false
+	if labelName~=v.labelName or labelDistance~=v.labelDistance then
+		v.descriptor.Name=labelName..(labelDistance and string.format(" [%d studs]",labelDistance)or "")
+		v.labelName,v.labelDistance=labelName,labelDistance
+	end
 	v.descriptor.Health=state.hp and state.hp*100 or nil
 	v.descriptor.MaxHealth=state.hp and 100 or nil
 end
@@ -706,6 +878,8 @@ local function frame(dt)
 	-- Each retained primitive is hidden only when it stops being used.
 	APP.menuOpen=APP.Library and APP.Library.Visible and APP.window and APP.window.visible or false
 	APP.stats.enemies,APP.stats.allies,APP.stats.unknown,APP.stats.target=0,0,0,nil
+	APP.stats.targetPart,APP.stats.aimPoint=nil,nil
+	APP.stats.visibilityPointProjections=0
 	APP.stats.healthKnown,APP.stats.healthUnknown=0,0
 	APP.stats.visibleEnemies,APP.stats.blockedEnemies,APP.stats.visibilityUnknown=0,0,0
 	local camera=workspace.CurrentCamera;local cf=read(camera,"CFrame");local view=Drawing3D.GetViewportSize()
@@ -725,23 +899,43 @@ local function frame(dt)
 			if hp==nil then APP.stats.healthUnknown=APP.stats.healthUnknown+1 else APP.stats.healthKnown=APP.stats.healthKnown+1 end
 			if not present or hp~=nil and hp<=0 then return end
 			if not enemy and CFG.teamCheck and not CFG.showAllies then return end
-			local headPose=e.poseNames.Head;local head=headPose and headPose.CFrame.Position;if not head then return end
+			local anchor=e.poseNames.Head or e.poseNames.Torso or e.poses[1]
+			if not anchor then return end
+			local head=anchor.CFrame.Position
 			local distance=(head-cf.Position).Magnitude;if distance<4 then return end
-			local screen,on=Drawing3D.WorldToViewportPoint(head);if not on or screen.Z<=0 then return end
+			local screen=Drawing3D.WorldToViewportPoint(head)
+			local margin=math.max(64,view.Y/math.max(distance,4)*4)
+			e.espNearby=distance<=CFG.visualRange+10 and screen.Z>0 and screen.X>=-margin and screen.X<=view.X+margin
+				and screen.Y>=-margin and screen.Y<=view.Y+margin
+			e.aimNearby=distance<=CFG.maxDistance+10 and screen.Z>0
+				and (Vector2.new(screen.X,screen.Y)-center).Magnitude<=CFG.fov+64
+			if screen.Z<=0 then return end
 			local aimPose=e.poseNames[CFG.targetPart];local aimPosition=aimPose and aimPose.CFrame.Position
 			if distance>math.max(CFG.visualRange,CFG.maxDistance)then return end
-			local lineOfSight,aimClear
-			if aimPosition and (CFG.wallCheck or CFG.visibilityColors)and (enemy or not CFG.teamCheck)then
-				local request={key=e.key,origin=cf.Position,point=aimPosition}
-				requests[#requests+1]=request
-				local delta=(Vector2.new(screen.X,screen.Y)-center).Magnitude
-				local priority=CFG.targetMode=="Closest to player"and distance or CFG.targetMode=="Lowest health"and hp or delta
-				if CFG.targetMode=="Lowest health"and hp==nil then priority=nil end
-				if CFG.sticky and held and APP.lock==e.key then priority=-1 end
-				if (enemy or not CFG.teamCheck)and distance<=CFG.maxDistance and delta<=CFG.fov and priority and priority<aimRequestScore then
-					aimRequest,aimRequestScore=request,priority
+			local lineOfSight,aimClear,bodyTarget
+			if (CFG.wallCheck or CFG.visibilityColors)and (enemy or not CFG.teamCheck)then
+				local request
+				if CFG.adaptiveParts then
+					request={key=e.key,origin=cf.Position,poses=e.poseNames,names=e.partNames}
+					lineOfSight,bodyTarget=bodyVisibility(e,cf.Position,center,now,CFG.aim and distance<=CFG.maxDistance)
+				elseif aimPosition then
+					request={key=e.key,origin=cf.Position,point=aimPosition,partName=CFG.targetPart}
+					lineOfSight,aimClear=cachedVisibility(e.key,cf.Position,aimPosition,now,CFG.targetPart)
 				end
-				lineOfSight,aimClear=cachedVisibility(e.key,cf.Position,aimPosition,now)
+				if request then
+					requests[#requests+1]=request
+					local delta=math.huge
+					for _,pose in ipairs(CFG.adaptiveParts and e.poses or (aimPose and {aimPose}or {}))do
+						local projected,on=Drawing3D.WorldToViewportPoint(pose.CFrame.Position)
+						if on then delta=math.min(delta,(Vector2.new(projected.X,projected.Y)-center).Magnitude)end
+					end
+					local priority=delta
+					if CFG.targetMode=="Closest to player"then priority=distance elseif CFG.targetMode=="Lowest health"then priority=hp end
+					if CFG.sticky and held and APP.lock==e.key then priority=-1 end
+					if CFG.aim and distance<=CFG.maxDistance and delta<=CFG.fov and priority and priority<aimRequestScore then
+						aimRequest,aimRequestScore=request,priority
+					end
+				end
 			end
 			if enemy then
 				if lineOfSight==true then APP.stats.visibleEnemies=APP.stats.visibleEnemies+1
@@ -750,17 +944,23 @@ local function frame(dt)
 			end
 			local state={e=e,enemy=enemy,position=head,distance=distance,screen=screen,hp=hp,lineOfSight=lineOfSight}
 			if distance<=CFG.visualRange and (enemy or CFG.showAllies) then states[#states+1]=state end
-			if CFG.teamCheck and not enemy or distance>CFG.maxDistance then return end
-			if not aimPosition or not canAimAt(aimClear) then return end
-			local aimScreen,visible=screen,true
-			if CFG.targetPart=="Torso"then aimScreen,visible=Drawing3D.WorldToViewportPoint(aimPosition)end
-			if not visible then return end
+			if CFG.teamCheck and not enemy then return end
+			local aimScreen,aimWorld,aimPart,aimDistance
+			if CFG.wallCheck and CFG.adaptiveParts then
+				if not bodyTarget then return end
+				aimScreen,aimWorld,aimPart,aimDistance=bodyTarget.point,bodyTarget.worldPoint,bodyTarget.partName,bodyTarget.distance
+			else
+				if not aimPosition or not canAimAt(aimClear)then return end
+				local on;aimScreen,on=Drawing3D.WorldToViewportPoint(aimPosition);if not on then return end
+				aimWorld,aimPart,aimDistance=aimPosition,CFG.targetPart,(aimPosition-cf.Position).Magnitude
+			end
+			if aimDistance>CFG.maxDistance then return end
 			local delta=(Vector2.new(aimScreen.X,aimScreen.Y)-center).Magnitude;if delta>CFG.fov then return end
 			local priority=delta
-			if CFG.targetMode=="Closest to player" then priority=distance elseif CFG.targetMode=="Lowest health" then priority=state.hp end
+			if CFG.targetMode=="Closest to player" then priority=aimDistance elseif CFG.targetMode=="Lowest health" then priority=state.hp end
 			if priority==nil then return end
 			if CFG.sticky and held and APP.lock==e.key then priority=-1 end
-			if priority<score then score=priority;best={e=e,point=aimScreen} end
+			if priority<score then score=priority;best={e=e,point=aimScreen,worldPoint=aimWorld,partName=aimPart}end
 		end)
 		if not ok then report(err) end
 	end
@@ -771,6 +971,7 @@ local function frame(dt)
 	if not best then APP.lock=nil end
 	if best then
 		APP.stats.target=best.e.name or "Enemy"
+		APP.stats.targetPart,APP.stats.aimPoint=best.partName,best.worldPoint
 		if CFG.targetLine then drawLine(targetLine,center,Vector2.new(best.point.X,best.point.Y),CFG.targetColor) end
 	end
 	if reason=="Tracking" then
@@ -788,6 +989,7 @@ local function frame(dt)
 	end
 	status.Visible=CFG.showStatus
 	finishDrawings()
+	APP.stats.adapterMs=(os.clock()-now)*1000
 end
 --=========================== CORE START ==========================--
 if read(game,"PlaceId")~=292439477 then warn("[PF_ASSIST] This adapter requires Phantom Forces (292439477).");APP.stop();return end
@@ -840,7 +1042,9 @@ local okUI,whyUI=pcall(function()
 		configAliases={["pf/thickness"]="pf/chamsThickness"}})
 	APP.window=w;APP.controls={}
 	local function changed(key,value)
-		CFG[key]=normalizeSetting(key,value);APP.styleRevision=APP.styleRevision+1;saveConfig()
+		CFG[key]=normalizeSetting(key,value);APP.styleRevision=APP.styleRevision+1
+		if key=="adaptiveParts" or key=="surfacePoints" then visibilityEntries={} end
+		saveConfig()
 	end
 	local function color(section,key,title)
 		local handle=section:AddColorPicker({text=title,flag="pf/"..key,default=CFG[key],callback=function(value)changed(key,value)end})
@@ -862,12 +1066,14 @@ local okUI,whyUI=pcall(function()
 	local targeting=combat:NewSection("Targeting","left")
 	APP.aimControl=toggle(targeting,"aim","Enable aim")
 	dropdown(targeting,"targetMode","Target priority",{"Closest to crosshair","Closest to player","Lowest health"})
-	dropdown(targeting,"targetPart","Target part",{"Head","Torso"})
+	dropdown(targeting,"targetPart","Preferred part",{"Head","Torso"})
+	toggle(targeting,"adaptiveParts","Aim at exposed body parts")
+	toggle(targeting,"surfacePoints","Probe partial peeks inside body parts")
 	toggle(targeting,"teamCheck","Aim team check")
 	toggle(targeting,"wallCheck","Aim visibility check (raycast)")
 	toggle(targeting,"sticky","Keep selected target while holding")
 	slider(targeting,"maxDistance","Aim range (studs)",10,10000,10)
-	targeting:AddParagraph({text="Lowest health uses the replicated health-bar percentage. Unknown health is excluded. Targeting remains inside the FOV and selected range."})
+	targeting:AddParagraph({text="The preferred part wins when a fresh clear point is available; otherwise another exposed part can be selected. Partial-peek probes stay inside approximate body volumes. Unknown or stale rays never authorize aim. Lowest health skips unknown HP."})
 	local behavior=combat:NewSection("Activation & motion","right")
 	behavior:AddKeybind({text="Aim activation (hold)",flag="pf/aimKey",default=CFG.aimKey,mode="Hold",onChanged=function(key)changed("aimKey",key)end})
 	slider(behavior,"smoothing","Smooth (0 = instant)",0,100,.5)
@@ -978,11 +1184,14 @@ local okUI,whyUI=pcall(function()
 	screen:AddLabel({text="Entities",get=function()return string.format("Enemies %d / allies %d / drawn %d",APP.stats.enemies or 0,APP.stats.allies or 0,APP.stats.drawn or 0)end})
 	screen:AddLabel({text="Last error",get=function()return APP.stats.lastError or "No errors" end})
 	local utility=w:NewTab("Runtime","Performance, profiles and lifecycle")
+	screen:AddLabel({text="Selected body part",get=function()return "Aim point: "..(APP.stats.targetPart or "None")end})
 	screen:AddLabel({text="Raycast state",get=function()return APP.stats.raycastState or "Waiting for scan"end})
 	screen:AddLabel({text="Ray query cost",get=function()return string.format("Ray calls %d / last %.2f ms",APP.stats.rayCalls or 0,APP.stats.rayMs or 0)end})
 	screen:AddLabel({text="Visibility counts",get=function()return string.format("Visible %d / Blocked %d / Unknown %d",APP.stats.visibleEnemies or 0,APP.stats.blockedEnemies or 0,APP.stats.visibilityUnknown or 0)end})
 	screen:AddParagraph({text="Map-only approximate raycast checks the selected head/torso point. Certified map snapshots remain usable during rebuilding (up to 5 seconds). Aim requires a recent point check; ESP retains confirmed colors briefly. Large maps use a static spatial grid until the map changes or you rebuild it. Initial or invalid geometry stays unknown. Terrain and exact mesh silhouettes are not supported by the external raycast."})
 	local performance=utility:NewSection("Performance","full")
+	toggle(performance,"fastInfoESP","Lightweight bounds for names / boxes / bars / tracers")
+	performance:AddLabel({text="Pose work",get=function()return string.format("Read %d parts | pose %.2f ms | adapter %.2f ms",APP.stats.poseParts or 0,APP.stats.poseReadMs or 0,APP.stats.adapterMs or 0)end})
 	toggle(performance,"lightweight","Lightweight visibility batches")
 	performance:AddLabel({text="ESP follows the Jael X overlay refresh rate"})
 	slider(performance,"rosterRate","Roster refresh (seconds)",.2,2,.1)
