@@ -539,6 +539,32 @@ local function sampleVisibility(request)
 		entry.origin,entry.point=request.origin,request.point end
 	visibilityEntries[request.key]=entry
 end
+-- Advance the fair queue only for requests actually visited. A priority sample
+-- must not consume an unseen player's slot (even-sized rosters used to starve).
+local function updateVisibilityBatch(requests,priority,cursor,maxCount,budget)
+	if #requests==0 then return 0 end
+	local started,count,visited=os.clock(),0,0
+	local refresh=CFG.lightweight and .08 or .05
+	local function due(request,interval)
+		local entry=visibilityEntries[request.key]
+		return not entry or started-entry.checkedAt>=interval
+	end
+	local function sample(request)
+		local ok,err=pcall(sampleVisibility,request)
+		if not ok then report(err)end
+		count=count+1
+	end
+	if priority and due(priority,.04)then sample(priority)end
+	while visited<#requests and count<maxCount do
+		if count>0 and os.clock()-started>=budget then break end
+		cursor=cursor%#requests+1;visited=visited+1
+		local request=requests[cursor]
+		if (not priority or request.key~=priority.key)and due(request,refresh)then sample(request)end
+	end
+	APP.stats.rayBatchQueries=count
+	APP.stats.rayBatchMs=(os.clock()-started)*1000
+	return cursor
+end
 local function canAimAt(lineOfSight)
 	return not CFG.wallCheck or lineOfSight==true
 end
@@ -702,7 +728,7 @@ local function frame(dt)
 		end)
 		if not ok then report(err) end
 	end
-	visibilityRequests=requests;APP.visibilityPriority=held and aimRequest or nil
+	visibilityRequests=requests;APP.visibilityPriority=aimRequest
 	for _,state in ipairs(states) do local ok,err=pcall(renderEntity,state,best and best.e.key==state.e.key,view);if not ok then report(err) end end
 	local enabled=true;if input.get_status then local ok,info=pcall(input.get_status);if ok then enabled=info.enabled end end
 	local reason=not CFG.aim and "Disabled" or APP.menuOpen and "Menu open" or not input.is_window_focused() and "Game unfocused" or not enabled and "Input disabled" or not held and "Hold aim key" or not best and (CFG.wallCheck and "No visible target / FOV / range" or "No target in FOV / range") or "Tracking"
@@ -738,10 +764,9 @@ APP.connections[#APP.connections+1]=UIS.InputBegan:Connect(function(event)
 	elseif key=="F2" then CFG.aim=not CFG.aim;if APP.aimControl then APP.aimControl:Set(CFG.aim,true) end
 	elseif key=="F3" then CFG.chams=not CFG.chams;if APP.chamsControl then APP.chamsControl:Set(CFG.chams,true) end end
 end)
--- One bounded ray query per worker interval, independent of overlay FPS.
--- Alternate aim-priority samples with round-robin ESP to prevent starvation.
+-- Visibility uses short batches with a time budget, independent of overlay FPS.
  task.spawn(function()
-	local cursor,turn,nextPrune=0,0,0
+	local cursor,nextPrune=0,0
 	while running()do
 		if os.clock()>=nextPrune then
 			nextPrune=os.clock()+2
@@ -750,12 +775,9 @@ end)
 		end
 		local requests=visibilityRequests
 		if (CFG.wallCheck or CFG.visibilityColors)and #requests>0 then
-			cursor=cursor%#requests+1;turn=turn+1
-			local request=turn%2==0 and APP.visibilityPriority or requests[cursor]
-			local ok,err=pcall(sampleVisibility,request or requests[cursor])
-			if not ok then report(err)end
+			cursor=updateVisibilityBatch(requests,APP.visibilityPriority,cursor,CFG.lightweight and 6 or 8,.002)
 		end
-		task.wait(CFG.lightweight and .04 or .025)
+		task.wait(CFG.lightweight and .016 or .01)
 	end
  end)
 task.spawn(function()while running() do local ok,err=pcall(refreshRoster);if not ok then roster={};report(err) end;task.wait(CFG.rosterRate) end end)
@@ -842,7 +864,7 @@ local okUI,whyUI=pcall(function()
 	screen:AddLabel({text="Visibility counts",get=function()return string.format("Visible %d / Blocked %d / Unknown %d",APP.stats.visibleEnemies or 0,APP.stats.blockedEnemies or 0,APP.stats.visibilityUnknown or 0)end})
 	screen:AddParagraph({text="Map-only approximate raycast checks the selected head/torso point. Certified map snapshots remain usable during rebuilding (up to 5 seconds). Aim requires a recent point check; ESP retains confirmed colors briefly. Large maps use a static spatial grid until the map changes or you rebuild it. Initial or invalid geometry stays unknown. Terrain and exact mesh silhouettes are not supported by the external raycast."})
 	local performance=utility:NewSection("Performance","full")
-	toggle(performance,"lightweight","Lightweight ray updates (max 25 per second)")
+	toggle(performance,"lightweight","Lightweight visibility batches")
 	performance:AddLabel({text="ESP follows the Jael X overlay refresh rate"})
 	slider(performance,"rosterRate","Roster refresh (seconds)",.2,2,.1)
 	performance:AddParagraph({text="Rendering follows the app overlay rate with no script FPS cap. Body bounds uses one chams volume; Body parts preserves individual limbs. The slower registry loop only discovers or removes character models."})
