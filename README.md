@@ -175,3 +175,13 @@ Raycasts use approximate external bounding boxes, not engine depth or exact mesh
 ### Phantom Forces raycast cache repair
 
 The hub handles map colliders thinner than the native 0.01-stud limit separately rather than letting one skipped collider mark the whole map unknown. Those parts are filtered from native scanning and tested with supplemental oriented-box segment intersections. Runtime includes Rebuild visibility cache. Live Jael X 1.31.2 validation: 5859 native parts, 1 thin collider, 0 skipped; clear segment visibility true and enemy classification no longer universally unknown. Other unreadable geometry still fails closed.
+
+### Phantom Forces stability, performance and memory budget
+
+The current hub replaces per-player/per-frame ray queries with a cooperative sampled queue. Lightweight mode defaults to max 60 overlay FPS and roughly 25 ray queries/sec. Completed native snapshots remain usable through a bounded rebuild; retained display colors never independently authorize aim.
+
+Maps beyond native limits use compact numeric OBBs in a 64-stud spatial grid built in batches, with bounded child traversal rather than `GetDescendants`. Initial large-map setup may take 15–20 seconds; the cache then stays static until MapParts changes or Runtime > Rebuild visibility cache is clicked. Moving/destructible map geometry requires a rebuild. Mesh/Terrain accuracy is still limited to approximate boxes.
+
+Configs > Script memory includes a 16–48 MB Lua allocation soft budget (default 48) and current usage. It measures the script's Lua memory, not total app/game RAM or shader VRAM, and does not change the app VM hard limit. Above budget it collects memory and aborts/discards the spatial cache; aim stays blocked until a valid rebuild.
+
+Offline tests cover stale/moved aim checks, visual retention, native snapshot expiry, spatial intersections and budget abort. Live 1.31.2 builds completed 16443 and 27924 parts with zero unreadable geometry; sampled ready-cache queries were approximately 0.06–0.10 ms. This is not a shader FPS benchmark.
