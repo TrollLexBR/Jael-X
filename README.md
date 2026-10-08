@@ -171,3 +171,7 @@ The bottom-right corner draws a diagonal double-arrow beside the pointer while h
 `examples/PhantomF.lua` now requires Jael X 1.31.2 for its default map-only visibility check. Aim accepts only confirmed clear Head/Torso points. The ESP has independently configurable visible, blocked and unknown colors (green/red/gray by default). Aim visibility and ESP colors have separate toggles. Existing team, range, health and config behavior is retained.
 
 Raycasts use approximate external bounding boxes, not engine depth or exact mesh/Terrain geometry. Incomplete, truncated or skipped scans block aim until visibility is known; status appears in Appearance. Offline visibility tests pass; live gameplay needs validation.
+
+### Phantom Forces raycast cache repair
+
+The hub handles map colliders thinner than the native 0.01-stud limit separately rather than letting one skipped collider mark the whole map unknown. Those parts are filtered from native scanning and tested with supplemental oriented-box segment intersections. Runtime includes Rebuild visibility cache. Live Jael X 1.31.2 validation: 5859 native parts, 1 thin collider, 0 skipped; clear segment visibility true and enemy classification no longer universally unknown. Other unreadable geometry still fails closed.

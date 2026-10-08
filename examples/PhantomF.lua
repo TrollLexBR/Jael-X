@@ -290,6 +290,44 @@ local function activation()
 	return false
 end
 --=========================== MAP VISIBILITY ==========================--
+local rayCache={root=nil,params=nil,thin={},ready=false}
+local function prepareRayCache(root,force)
+	if rayCache.root==root and rayCache.ready and not force then return end
+	local params=RaycastParams.new();params.FilterType=Enum.RaycastFilterType.Exclude
+	local excluded,thin={},{}
+	for _,part in ipairs(root:GetDescendants())do
+		if part:IsA("BasePart")then
+			local size,cf=read(part,"Size"),read(part,"CFrame")
+			if size and cf and size.X>0 and size.Y>0 and size.Z>0
+				and (size.X<.01 or size.Y<.01 or size.Z<.01)then
+				excluded[#excluded+1]=part;thin[#thin+1]=part
+			end
+		end
+	end
+	-- Native filters allow 128 instances. Never silently omit excess colliders.
+	assert(#excluded<=128,"Too many thin map colliders")
+	params.FilterDescendantsInstances=excluded
+	rayCache={root=root,params=params,thin=thin,ready=true}
+	if force then raycast.refresh(root,params)end
+end
+local function thinIntersection(part,origin,destination)
+	local cf,size=read(part,"CFrame"),read(part,"Size")
+	if not cf or not size then return nil end
+	local o=cf:PointToObjectSpace(origin);local d=cf:VectorToObjectSpace(destination-origin)
+	local lo,hi=0,1
+	for _,axis in ipairs({"X","Y","Z"})do
+		local half=size[axis]/2;local a,b=o[axis],d[axis]
+		if half<=0 then return nil end
+		if math.abs(b)<1e-9 then if math.abs(a)>half then return false end
+		else
+			local first,last=(-half-a)/b,(half-a)/b
+			if first>last then first,last=last,first end
+			lo,hi=math.max(lo,first),math.min(hi,last)
+			if lo>hi then return false end
+		end
+	end
+	return lo<1 and hi>0
+end
 local function pointVisibility(origin, destination)
 	if not raycast or type(raycast.visible)~="function" then
 		APP.stats.raycastState="Raycast API unavailable"
@@ -302,14 +340,24 @@ local function pointVisibility(origin, destination)
 	end
 	-- Never force refresh per target: the native scanner must finish its batch.
 	-- A map-only root excludes player bounds and viewmodels from wall checks.
-	local ok,clear,hit,scan=pcall(raycast.visible,root,origin,destination)
+	local prepared,err=pcall(prepareRayCache,root,false)
+	if not prepared then APP.stats.raycastState="Map cache error: "..tostring(err);return nil end
+	local ok,clear,hit,scan=pcall(raycast.visible,root,origin,destination,rayCache.params)
+	APP.stats.rayScan=scan;APP.stats.thinColliders=#rayCache.thin
 	if not ok then APP.stats.raycastState="Raycast error";return nil end
 	if type(scan)~="table" or scan.Complete~=true or scan.Truncated==true
 		or (tonumber(scan.Skipped) or 0)>0 or type(clear)~="boolean" then
 		APP.stats.raycastState=scan and scan.Truncated and "Map scan truncated" or "Map scan incomplete / skipped geometry"
 		return nil
 	end
-	APP.stats.raycastState="Map raycast ready (approximate)"
+	APP.stats.raycastState=string.format("Map ready: %d parts / %d thin colliders",scan.Parts or 0,#rayCache.thin)
+	if clear then
+		for _,part in ipairs(rayCache.thin)do
+			local success,blocked=pcall(thinIntersection,part,origin,destination)
+			if not success or blocked==nil then return nil end
+			if blocked then return false end
+		end
+	end
 	return clear
 end
 local function canAimAt(lineOfSight)
@@ -551,6 +599,10 @@ local okUI,whyUI=pcall(function()
 	slider(performance,"fpsCap","Overlay update limit",30,240,1)
 	slider(performance,"rosterRate","Roster refresh (seconds)",.2,2,.1)
 	performance:AddParagraph({text="The update limit cannot exceed the app's overlay rate. Positions are read in PreRender; the slower registry loop only discovers or removes character models."})
+	performance:AddButton({text="Rebuild visibility cache",callback=function()
+		local root=workspace:FindFirstChild("Map");assert(root,"Map unavailable")
+		prepareRayCache(root,true);Library:Notify("Map cache","Rebuilding map scan; aim waits until complete")
+	end})
 	performance:AddButton({text="Refresh players now",callback=function()local ok,err=pcall(refreshRoster);if not ok then report(err)else Library:Notify("Roster refreshed",#roster.." character models")end end})
 	performance:AddButton({text="Save current settings",callback=function()saveConfig();local ok,err=w:SaveConfig("Last session");assert(ok,err);Library:Notify("Saved","Current settings and JoX profile saved")end})
 	performance:AddButton({text="Unload everything",callback=APP.stop})
