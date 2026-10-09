@@ -64,3 +64,10 @@ node --test tests/phantom-entities.cjs tests/phantom-visibility.cjs tests/phanto
 ```
 
 Visibility scheduler regression tests cover every player in an even-sized roster with a priority target, avoid re-querying fresh results, and preserve the fair cursor when one expensive query exhausts the time budget. This fixes the previous held-aim slot starvation. ESP still checks the selected head/torso point and uses approximate map boxes; scheduler improvements do not remove geometric false occlusion.
+
+
+## 2026-10-09: environment controls and viewmodel safeguard
+
+- Environment tab: Full bright and Custom ambient color, with independent RGB controls. The custom color takes precedence over white ambient when both are enabled. Disabling Full bright restores brightness/shadows while the tint remains enabled; disabling both restores the original lighting.
+- Viewmodel controls were prepared for arms, separate sleeves and the active equipped item, including material dropdowns. They are explicitly unavailable: the live renderer refresh detached the PF rig and Reset VM did not recover its visual. No working viewmodel customization is claimed. Native 1.31.26 rejects camera-model appearance writes as a regression safeguard.
+- `pf-viewmodel-test.lua` is now a Lighting-only test by default (Full bright + pink tint). Camera model mutations are blocked. F4 restores and unloads. Existing mesh textures are retained; TextureID/SurfaceAppearance removal is unavailable.

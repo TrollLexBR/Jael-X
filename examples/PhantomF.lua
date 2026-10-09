@@ -40,6 +40,10 @@ local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local RS = game:GetService("RunService")
 local CFG = {
+	fullBright=false, environmentEnabled=false, environmentRed=255, environmentGreen=80, environmentBlue=180,
+	sleevesEnabled=false, sleevesRed=255, sleevesGreen=80, sleevesBlue=180,
+	armsEnabled=false, armsRed=255, armsGreen=80, armsBlue=180, armsMaterial="Original",
+	weaponEnabled=false, weaponRed=100, weaponGreen=180, weaponBlue=255, weaponMaterial="Original",
 	esp = true, skeleton = false,
 	chamsStyle = "Silhouette", chamsOutline = true,
 	chamsOutlineColor = Color3.new(1, 1, 1), chamsOutlineOpacity = 1, chamsThickness = 1.5,
@@ -80,6 +84,8 @@ for _, kind in ipairs({"chams", "box", "skeleton", "tracer", "name"}) do
 	CFG[kind .. "Color"] = Color3.new(1, 1, 1)
 end
 local ranges = {
+	sleevesRed={0,255},sleevesGreen={0,255},sleevesBlue={0,255},environmentRed={0,255},environmentGreen={0,255},environmentBlue={0,255},
+	armsRed={0,255},armsGreen={0,255},armsBlue={0,255},weaponRed={0,255},weaponGreen={0,255},weaponBlue={0,255},
 	smoothing={0,100}, fov={40,400}, maxDistance={10,10000}, visualRange={10,10000},
 	opacity={0,1}, nameSize={6,64}, thickness={.1,8}, rosterRate={.2,2},
 	chamsOutlineOpacity={0,1}, chamsThickness={.1,8}, boxOpacity={0,1}, boxThickness={.1,8},
@@ -91,6 +97,8 @@ local ranges = {
 	healthThickness={.1,12}, healthOffset={0,30},
 }
 local choices = {
+	armsMaterial={"Original","Plastic","SmoothPlastic","Neon","Glass","Metal","ForceField"},
+	weaponMaterial={"Original","Plastic","SmoothPlastic","Neon","Glass","Metal","ForceField"},
 	chamsStyle={"Silhouette","Wireframe","Volumes"}, boxStyle={"Corners","Full box","Dashed","3D"},
 	tracerOrigin={"Top","Center","Bottom","Mouse"}, tracerTarget={"Top","Center","Bottom"},
 	healthSide={"Left","Right","Bottom"}, nameFont={"Segoe UI","Arial","Consolas","Tahoma"},
@@ -178,9 +186,12 @@ end
 local function removeVisual(v)
 	if v.entry then v.entry:Remove() end
 end
+local restoreViewmodel=function()end
+local restoreEnvironment=function()end
 function APP.stop()
 	if not APP.alive then return end
 	APP.alive = false
+	restoreViewmodel();restoreEnvironment()
 	for _, c in ipairs(APP.connections) do pcall(function() c:Disconnect() end) end
 	for _, v in pairs(APP.visuals) do removeVisual(v) end
 	APP.visuals = {}
@@ -1028,6 +1039,140 @@ end})
 	end
  end)
 task.spawn(function()while running() do local ok,err=pcall(refreshRoster);if not ok then roster={};report(err) end;task.wait(CFG.rosterRate) end end)
+--=========================== LOCAL VIEWMODEL ==========================--
+-- Camera children are used instead of obfuscated model names. Arm models have
+-- a direct BasePart named Arm; the current weapon is the unique other mesh model.
+local viewmodelAppearanceReady=false
+local viewmodelSnapshots={}
+local function sameAppearance(a,b)
+	if typeof(a)=="Color3" and typeof(b)=="Color3" then
+		return math.abs(a.R-b.R)<.5/255+.00001 and math.abs(a.G-b.G)<.5/255+.00001 and math.abs(a.B-b.B)<.5/255+.00001
+	end
+	return tostring(a)==tostring(b)
+end
+local function restoreViewProperty(part,record,key)
+	local state=record[key]
+	if not state then return end
+	if read(part,"Parent")==record.parent and sameAppearance(read(part,key),state.last) then
+		local ok,err=pcall(function()part[key]=state.original end)
+		if not ok then report("Viewmodel restore: "..tostring(err)) end
+	end
+	record[key]=nil
+end
+restoreViewmodel=function()
+	for part,record in pairs(viewmodelSnapshots) do
+		for _,key in ipairs({"Color","Material"})do restoreViewProperty(part,record,key)end
+	end
+	viewmodelSnapshots={}
+end
+local function setViewProperty(part,record,key,value)
+	if value==nil then restoreViewProperty(part,record,key);return end
+	local state=record[key]
+	if state and sameAppearance(state.desired,value) then return end
+	if record.retry and os.clock()<record.retry then return end
+	local current=read(part,key)
+	if current==nil then return end
+	local ok,err=pcall(function()
+		assert(part:CanWriteProperty(key),"Current renderer does not support "..key)
+		part[key]=value
+	end)
+	if not ok then record.retry=os.clock()+2;APP.stats[record.errorScope or "viewmodelError"]=tostring(err);return end
+	state=state or {original=current}
+	state.desired=value;state.last=value;record[key]=state
+end
+local function collectViewParts(model)
+	local parts,stack,visited={},{{model,0}},0
+	while #stack>0 and #parts<256 and visited<512 do
+		visited=visited+1
+		local next=table.remove(stack)
+		for _,child in ipairs(children(next[1]))do
+			local ok,part=pcall(function()return child:IsA("BasePart")end)
+			if ok and part then parts[#parts+1]=child
+			elseif next[2]<6 then stack[#stack+1]={child,next[2]+1}end
+		end
+	end
+	return parts
+end
+local function refreshViewmodel()
+	-- Live camera-mesh refresh detached the PF rig; do not repeat that path.
+	if not viewmodelAppearanceReady then restoreViewmodel();APP.stats.viewmodelParts=0;APP.stats.viewmodelError="Viewmodel customization is temporarily disabled after an animation regression";return end
+	if not CFG.armsEnabled and not CFG.sleevesEnabled and not CFG.weaponEnabled then restoreViewmodel();APP.stats.viewmodelParts=0;return end
+	local camera=read(workspace,"CurrentCamera")
+	local arms,weapons={},{}
+	for _,model in ipairs(children(camera))do
+		if read(model,"ClassName")=="Model"then
+			local arm,parts=false,0
+			for _,part in ipairs(children(model))do
+				if read(part,"Name")=="Arm" and read(part,"ClassName")=="Part"then arm=true end
+				local ok,isPart=pcall(function()return part:IsA("BasePart")end)
+				if ok and isPart then parts=parts+1 end
+			end
+			if arm then arms[#arms+1]=model elseif parts>0 then weapons[#weapons+1]=model end
+		end
+	end
+	local active={}
+	APP.stats.viewmodelError=nil
+	local function apply(model,prefix)
+		local color=Color3.fromRGB(CFG[prefix.."Red"],CFG[prefix.."Green"],CFG[prefix.."Blue"])
+		local selected=CFG[prefix.."Material"]
+		local material=selected~="Original" and Enum.Material[selected] or nil
+		for _,part in ipairs(collectViewParts(model))do
+			local sleeve=prefix=="arms" and read(part,"Name")=="Sleeves"
+			if CFG[prefix.."Enabled"] or (sleeve and CFG.sleevesEnabled)then
+			active[part]=true
+			local parent=read(part,"Parent")
+			local record=viewmodelSnapshots[part]
+			if not record or record.parent~=parent then record={parent=parent};viewmodelSnapshots[part]=record end
+			local chosen=(sleeve and CFG.sleevesEnabled)and Color3.fromRGB(CFG.sleevesRed,CFG.sleevesGreen,CFG.sleevesBlue)or color
+			setViewProperty(part,record,"Color",chosen);setViewProperty(part,record,"Material",CFG[prefix.."Enabled"]and material or nil)
+			end
+		end
+	end
+	if CFG.armsEnabled or CFG.sleevesEnabled then for _,model in ipairs(arms)do apply(model,"arms")end end
+	-- Ambiguous camera models remain untouched rather than recoloring effects.
+	if CFG.weaponEnabled and #arms>0 and #weapons==1 then apply(weapons[1],"weapon")
+	elseif CFG.weaponEnabled then APP.stats.viewmodelError="Equipped item is unavailable or ambiguous"end
+	local count=0
+	for part,record in pairs(viewmodelSnapshots)do
+		if active[part]then count=count+1 else
+			for _,key in ipairs({"Color","Material"})do restoreViewProperty(part,record,key)end
+			viewmodelSnapshots[part]=nil
+		end
+	end
+	APP.stats.viewmodelParts=count
+end
+local environmentOwner,environmentRecord=nil,nil
+local environmentKeys={"Ambient","OutdoorAmbient","Brightness","GlobalShadows"}
+restoreEnvironment=function()
+	if environmentOwner and environmentRecord then
+		for _,key in ipairs(environmentKeys)do restoreViewProperty(environmentOwner,environmentRecord,key)end
+	end
+	environmentOwner,environmentRecord=nil,nil
+end
+local function refreshEnvironment()
+	if not CFG.fullBright and not CFG.environmentEnabled then restoreEnvironment();return end
+	local lighting=game:GetService("Lighting")
+	if lighting~=environmentOwner then restoreEnvironment();environmentOwner=lighting;environmentRecord={parent=read(lighting,"Parent"),errorScope="environmentError"}end
+	APP.stats.environmentError=nil
+	-- Custom tint takes precedence over the white full-bright ambient.
+	local tint=CFG.environmentEnabled and Color3.fromRGB(CFG.environmentRed,CFG.environmentGreen,CFG.environmentBlue)or Color3.new(1,1,1)
+	setViewProperty(lighting,environmentRecord,"Ambient",tint)
+	setViewProperty(lighting,environmentRecord,"OutdoorAmbient",tint)
+	setViewProperty(lighting,environmentRecord,"Brightness",CFG.fullBright and 3 or nil)
+	local shadows=nil;if CFG.fullBright then shadows=false end
+	setViewProperty(lighting,environmentRecord,"GlobalShadows",shadows)
+end
+APP.refreshEnvironment=refreshEnvironment
+APP.restoreEnvironment=restoreEnvironment
+ task.spawn(function()
+	while running()do local ok,err=pcall(refreshEnvironment);if not ok then APP.stats.environmentError=tostring(err)end;task.wait(.5)end
+ end)
+APP.refreshViewmodel=refreshViewmodel
+APP.restoreViewmodel=restoreViewmodel
+ task.spawn(function()
+	while running()do local ok,err=pcall(refreshViewmodel);if not ok then APP.stats.viewmodelError=tostring(err)end;task.wait(.5)end
+ end)
+
 --=========================== JOX INTERFACE ==========================--
 local okUI,whyUI=pcall(function()
 	local ok,Library=pcall(function()
@@ -1183,6 +1328,28 @@ local okUI,whyUI=pcall(function()
 	screen:AddLabel({text="Aim state",get=function()return "Aim: "..(APP.stats.aimReason or "Starting")end})
 	screen:AddLabel({text="Entities",get=function()return string.format("Enemies %d / allies %d / drawn %d",APP.stats.enemies or 0,APP.stats.allies or 0,APP.stats.drawn or 0)end})
 	screen:AddLabel({text="Last error",get=function()return APP.stats.lastError or "No errors" end})
+	local view=w:NewTab("Viewmodel","Unavailable pending animation-safe support")
+	for _,entry in ipairs({{"arms","Arms","left"},{"weapon","Equipped item","right"}})do
+		local prefix,title,side=entry[1],entry[2],entry[3]
+		local section=view:NewSection(title,side)
+		toggle(section,prefix.."Enabled","Customize "..title:lower())
+		for _,channel in ipairs({"Red","Green","Blue"})do slider(section,prefix..channel,channel,0,255,1)end
+		dropdown(section,prefix.."Material","Material",choices[prefix.."Material"])
+		section:AddParagraph({text="Client appearance only. Existing mesh textures remain; TextureID and SurfaceAppearance removal are unavailable in this external API. Unsupported renderer pieces are skipped."})
+	end
+	view:NewSection("Status","left"):AddLabel({text="Viewmodel state",get=function()return APP.stats.viewmodelError or ((APP.stats.viewmodelParts or 0).." tracked parts")end})
+	local sleeves=view:NewSection("Sleeves","left")
+	toggle(sleeves,"sleevesEnabled","Separate sleeve color")
+	for _,channel in ipairs({"Red","Green","Blue"})do slider(sleeves,"sleeves"..channel,channel,0,255,1)end
+	local environment=w:NewTab("Environment","Brightness and ambient tint")
+	local bright=environment:NewSection("Lighting","left")
+	toggle(bright,"fullBright","Full bright")
+	bright:AddParagraph({text="Adjusts Brightness, Ambient, OutdoorAmbient and GlobalShadows. Custom ambient color stays active when Full bright is enabled. Original values restore when their controls are disabled or the script unloads."})
+	bright:AddLabel({text="Lighting state",get=function()return APP.stats.environmentError or "Ready"end})
+	local tint=environment:NewSection("Ambient color","right")
+	toggle(tint,"environmentEnabled","Custom ambient color")
+	for _,channel in ipairs({"Red","Green","Blue"})do slider(tint,"environment"..channel,channel,0,255,1)end
+	tint:AddParagraph({text="Ambient tint colors the lighting; existing materials and textures still contribute to the scene. Sky time remains unchanged."})
 	local utility=w:NewTab("Runtime","Performance, profiles and lifecycle")
 	screen:AddLabel({text="Selected body part",get=function()return "Aim point: "..(APP.stats.targetPart or "None")end})
 	screen:AddLabel({text="Raycast state",get=function()return APP.stats.raycastState or "Waiting for scan"end})
