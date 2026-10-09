@@ -122,6 +122,7 @@ local function updateLighting()
 	for object,record in pairs(atmosphereOriginal)do if not seen[object]then restoreAtmosphere(object,record);atmosphereOriginal[object]=nil end end
 
 end
+APP.refreshLighting=updateLighting
 local autoConfigPath="JaelConfigs/ar2-auto-config.json"
 local lastSavedConfig
 function APP.saveConfig()
@@ -868,12 +869,7 @@ APP.connections[#APP.connections+1]=RS.PreRender:Connect(function()local ok,err=
 APP.connections[#APP.connections+1]=UIS.InputBegan:Connect(function(e)
 	if e.KeyCode.Name=="M"then
 		if not APP.mapStateVerified then APP.mapOpen=not APP.mapOpen end
-		-- Explicit one-run settings take precedence over the saved preset and then autosave.
-for _,key in ipairs({"brightLighting","noDistanceFog"})do if type(options[key])=="boolean"then
-	C[key]=options[key];if APP.controls[key]then APP.controls[key]:SetValue(options[key])end
-end end
-APP.saveConfig()
-if APP.mapOpen and APP.Library then APP.Library:SetVisible(false)end
+		if APP.mapOpen and APP.Library then APP.Library:SetVisible(false)end
 	elseif e.KeyCode.Name=="F7"then local ok,p=pcall(function()return UIS:GetMouseLocation()end);if ok then APP.alignMapAt(p)end
 	elseif e.KeyCode.Name=="End"then APP.stop()elseif e.KeyCode.Name=="F6"then C.esp=not C.esp;if APP.controls.esp then APP.controls.esp:SetValue(C.esp,true)end end
 end)
@@ -981,7 +977,7 @@ if ok and type(lib)=="table"and lib.NewWindow then
 	toggle(lighting,"brightLighting","Full bright");slider(lighting,"sceneBrightness","Brightness",0,10)
 	toggle(lighting,"noDistanceFog","No fog");toggle(lighting,"noShadows","Disable global shadows")
 	lighting:AddLabel({get=function()return APP.lightingStatus or "Supported values restore when disabled or unloaded"end})
-	lighting:AddParagraph({text="Full bright raises brightness and ambient light and disables shadows. No fog removes distance fog plus Atmosphere density, haze, and glare (Jael X 1.31.13+). Settings restore when disabled or unloaded; the day/night clock is unchanged."})
+	lighting:AddParagraph({text="Full bright raises brightness and ambient light and disables shadows. No fog removes distance fog plus Atmosphere density, haze, and glare (Jael X 1.31.13+). Settings restore when disabled or unloaded; the day/night clock is unchanged. AR2 can overwrite these fields: full bright may flicker and Atmosphere fog suppression is not yet visually verified."})
 	d:AddLabel({get=function()return string.format("ESP callback: %.2f ms | Read faults: %d",APP.poseMs,APP.faults)end})
 	d:AddParagraph({text="RightControl toggles the menu. F6 toggles ESP. End unloads. GUI-derived fields show Unavailable when the exact game profile cannot read them."})
 	d:AddButton({text="Unload script",style="danger",callback=APP.stop})
@@ -993,6 +989,11 @@ if APP.window then
 	if APP.controls.aimBind then APP.controls.aimBind:SetMode("Hold")end
 	APP.saveConfig()
 end
+-- Explicit one-run settings take precedence over the saved preset and then autosave.
+for _,key in ipairs({"brightLighting","noDistanceFog"})do if type(options[key])=="boolean"then
+	C[key]=options[key];if APP.controls[key]then APP.controls[key]:SetValue(options[key])end
+end end
+APP.saveConfig()
 if APP.mapOpen and APP.Library then APP.Library:SetVisible(false)end
 local due={membership=0,vehicle=0,info=0,rank=0,save=0,lighting=0,party=0}
 refreshParty()
