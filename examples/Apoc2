@@ -601,12 +601,18 @@ local function renderMap(view)
 				else APP.mapLimited=APP.mapLimited+1 end
 			end end
 		end
-		APP.mapObjects=#entries;APP.mapDrawn=0
+		APP.mapObjects=#entries;APP.mapDrawn=0;APP.mapPlayerPositions=0;APP.mapPartyPositions=0
+		local positionedPlayers={}
 		for start=1,#parts,128 do
 			local chunk={};for i=start,math.min(#parts,start+127)do chunk[#chunk+1]=parts[i]end
 			local ok,poses=pcall(entities.get_parts_snapshot,chunk)
 			if ok then for j,pose in ipairs(poses.parts)do if pose then
 				local e=entries[start+j-1];local p=mapPoint(pose.cframe.Position,canvas,transform)
+				-- Count readable positions before clipping, independently of world ESP range.
+				if e.kind=="Character"and e.username and not positionedPlayers[e.username]then
+					positionedPlayers[e.username]=true;APP.mapPlayerPositions=APP.mapPlayerPositions+1
+					if isParty(e)then APP.mapPartyPositions=APP.mapPartyPositions+1 end
+				end
 				if p.X>=left and p.X<=right and p.Y>=top and p.Y<=bottom then
 					APP.mapDrawn=APP.mapDrawn+1
 					local color=entryColor(e)
@@ -627,7 +633,10 @@ local function renderMap(view)
 		immediate.circle(p,10,false,false,Color3.new(1,1,1))
 	end
 	immediate.pop_clip()
-	local summary="MAP | Players loaded: "..(APP.mapLoadedPlayers or 0).." / server: "..(APP.serverPlayers or 0).." | Vehicles: "..(APP.mapLoadedVehicles or 0)
+	APP.mapMissingPlayers=math.max(0,(APP.serverPlayers or 0)-(APP.mapPlayerPositions or 0))
+	local partyOthers=0;for name in pairs(APP.partyNames or {})do if name~=read(lp,"Name")then partyOthers=partyOthers+1 end end
+	local summary="MAP | Player positions: "..(APP.mapPlayerPositions or 0).." / "..(APP.serverPlayers or 0).." | Party: "..(APP.mapPartyPositions or 0).." / "..partyOthers.." | Vehicles: "..(APP.mapLoadedVehicles or 0)
+	if APP.mapMissingPlayers>0 then summary=summary.." | Position unavailable: "..APP.mapMissingPlayers end
 	if (APP.mapLimited or 0)>0 then summary=summary.." | Limited: "..APP.mapLimited end
 	text(Vector2.new(left,math.max(0,top-22)),transform and summary or(APP.mapStatus or "Map calibration pending"),Color3.new(1,1,1),12)
 end
@@ -887,6 +896,7 @@ if ok and type(lib)=="table"and lib.NewWindow then
 	mc:AddLabel({get=function()return APP.mapStatus or "Open the game map with M"end})
 	mc:AddLabel({get=function()return APP.mapStateSource or "Map state: waiting for first frame"end})
 	mc:AddParagraph({text="Dots use the original map canvas and follow its zoom and drag. The white ring marks your native map-marker anchor. Only objects replicated to this client can be shown."})
+	mc:AddParagraph({text="All readable player positions are shown regardless of ESP range. Players without a replicated character/position cannot receive a live dot. The map header reports available positions and party members; zoomed-out map is needed to see points outside the current view."})
 	mc:AddButton({text="Recalibrate this map",callback=function()mapTransforms[game.PlaceId]=nil;APP.mapFirstSample=nil end})
 	local v=visuals:NewSection("Names and distance","left")
 	toggle(v,"esp","Enable ESP")
