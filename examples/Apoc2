@@ -68,16 +68,24 @@ if type(options.mapOpen)=="boolean"then APP.mapOpen=options.mapOpen else APP.map
 local HTTP=game:GetService("HttpService")
 local Lighting=game:GetService("Lighting")
 local lightingOriginal={}
+local atmosphereOriginal={}
 local lightingFields={Brightness=true,Ambient=true,OutdoorAmbient=true,FogStart=true,FogEnd=true,GlobalShadows=true}
+local function restoreAtmosphere(object,record)
+	if read(object,"ClassName")=="Atmosphere"and read(object,"Parent")==record.parent then
+		for property,value in pairs(record.values)do pcall(function()object[property]=value end)end
+	end
+end
 local function restoreLighting()
 	for property,value in pairs(lightingOriginal)do pcall(function()Lighting[property]=value end)end
 	lightingOriginal={}
+	for object,record in pairs(atmosphereOriginal)do restoreAtmosphere(object,record)end
+	atmosphereOriginal={}
 end
 local function updateLighting()
-	local desired={}
-	if C.brightLighting then desired.Brightness=C.sceneBrightness;desired.Ambient=Color3.new(.8,.8,.8);desired.OutdoorAmbient=Color3.new(.8,.8,.8)end
+	local desired={};APP.lightingStatus="Values restore when disabled or unloaded"
+	if C.brightLighting then desired.Brightness=C.sceneBrightness;desired.Ambient=Color3.new(1,1,1);desired.OutdoorAmbient=Color3.new(1,1,1)end
 	if C.noDistanceFog then desired.FogStart=1000000;desired.FogEnd=1000000 end
-	if C.noShadows then desired.GlobalShadows=false end
+	if C.noShadows or C.brightLighting then desired.GlobalShadows=false end
 	for property in pairs(lightingFields)do
 		local value=desired[property]
 		if value~=nil then
@@ -93,6 +101,26 @@ local function updateLighting()
 			if ok then lightingOriginal[property]=nil end
 		end
 	end
+	local seen={}
+	if C.noDistanceFog then
+		for _,object in ipairs(children(Lighting))do if isa(object,"Atmosphere")then
+			seen[object]=true
+			local record=atmosphereOriginal[object]
+			if not record then record={parent=read(object,"Parent"),values={}};atmosphereOriginal[object]=record end
+			for _,property in ipairs({"Density","Haze","Glare"})do
+				local ok,allowed=pcall(function()return object:CanWriteProperty(property)end)
+				if ok and allowed then
+					if record.values[property]==nil then record.values[property]=read(object,property)end
+					if record.values[property]~=nil then
+						local written,err=pcall(function()object[property]=0 end)
+						if not written then APP.lightingStatus=cleanText(err)end
+					end
+				else APP.lightingStatus="Atmosphere unavailable: "..property.." (requires Jael X 1.31.13+)"end
+			end
+		end end
+	end
+	for object,record in pairs(atmosphereOriginal)do if not seen[object]then restoreAtmosphere(object,record);atmosphereOriginal[object]=nil end end
+
 end
 local autoConfigPath="JaelConfigs/ar2-auto-config.json"
 local lastSavedConfig
@@ -840,7 +868,12 @@ APP.connections[#APP.connections+1]=RS.PreRender:Connect(function()local ok,err=
 APP.connections[#APP.connections+1]=UIS.InputBegan:Connect(function(e)
 	if e.KeyCode.Name=="M"then
 		if not APP.mapStateVerified then APP.mapOpen=not APP.mapOpen end
-		if APP.mapOpen and APP.Library then APP.Library:SetVisible(false)end
+		-- Explicit one-run settings take precedence over the saved preset and then autosave.
+for _,key in ipairs({"brightLighting","noDistanceFog"})do if type(options[key])=="boolean"then
+	C[key]=options[key];if APP.controls[key]then APP.controls[key]:SetValue(options[key])end
+end end
+APP.saveConfig()
+if APP.mapOpen and APP.Library then APP.Library:SetVisible(false)end
 	elseif e.KeyCode.Name=="F7"then local ok,p=pcall(function()return UIS:GetMouseLocation()end);if ok then APP.alignMapAt(p)end
 	elseif e.KeyCode.Name=="End"then APP.stop()elseif e.KeyCode.Name=="F6"then C.esp=not C.esp;if APP.controls.esp then APP.controls.esp:SetValue(C.esp,true)end end
 end)
@@ -945,10 +978,10 @@ if ok and type(lib)=="table"and lib.NewWindow then
 	for _,a in ipairs({{"hud","Status HUD"},{"combat","Combat warning"},{"panelZombies","Nearest zombies"},{"panelPlayers","Nearest characters"},{"panelVehicles","Nearest vehicles"}})do toggle(u,a[1],a[2])end
 	local d=utilities:NewSection("Runtime","right")
 	local lighting=utilities:NewSection("Lighting","left")
-	toggle(lighting,"brightLighting","Bright lighting");slider(lighting,"sceneBrightness","Brightness",0,10)
-	toggle(lighting,"noDistanceFog","Remove distance fog");toggle(lighting,"noShadows","Disable global shadows")
+	toggle(lighting,"brightLighting","Full bright");slider(lighting,"sceneBrightness","Brightness",0,10)
+	toggle(lighting,"noDistanceFog","No fog");toggle(lighting,"noShadows","Disable global shadows")
 	lighting:AddLabel({get=function()return APP.lightingStatus or "Supported values restore when disabled or unloaded"end})
-	lighting:AddParagraph({text="Bright lighting does not change the day/night clock. Distance fog affects FogStart/FogEnd only; Atmosphere haze remains unsupported by the current native setter."})
+	lighting:AddParagraph({text="Full bright raises brightness and ambient light and disables shadows. No fog removes distance fog plus Atmosphere density, haze, and glare (Jael X 1.31.13+). Settings restore when disabled or unloaded; the day/night clock is unchanged."})
 	d:AddLabel({get=function()return string.format("ESP callback: %.2f ms | Read faults: %d",APP.poseMs,APP.faults)end})
 	d:AddParagraph({text="RightControl toggles the menu. F6 toggles ESP. End unloads. GUI-derived fields show Unavailable when the exact game profile cannot read them."})
 	d:AddButton({text="Unload script",style="danger",callback=APP.stop})
