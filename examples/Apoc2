@@ -54,7 +54,7 @@ local APP={alive=true,connections={},groups={Zombie={},Character={},Vehicle={},L
 		aimEnabled=true,showFov=true,fovRadius=120,aimBind="MB2",aimPlayers=true,aimZombies=false,aimSmooth=0,aimRange=1500,
 		prediction=true,predictionStrength=100,bulletSpeed=6000,bulletGravity=0,fovColor=Color3.fromRGB(220,220,230),
 		lootRange=600,zombieRange=800,vehicleRange=1200,characterRange=1000,labels=48,fontSize=12,distance=true,tags=true,
-		mapEnabled=true,mapPlayers=true,mapVehicles=false,mapZombies=false,mapLoot=false,mapPlayerLabels=true,mapVehicleLabels=true,mapZombieLabels=true,mapUsername=false,mapDotSize=4,mapMaxDots=512,mapOffsetX=0,mapOffsetY=0,mapSizeScale=1,
+		mapEnabled=true,mapPlayers=true,mapVehicles=true,mapZombies=false,mapLoot=false,mapPlayerLabels=true,mapVehicleLabels=true,mapZombieLabels=true,mapUsername=false,mapDotSize=4,mapMaxDots=512,mapOffsetX=0,mapOffsetY=0,mapSizeScale=1,
 		markers=true,combat=true,hud=true,panelZombies=true,panelPlayers=true,panelVehicles=true,
 		lootColor=Color3.fromRGB(110,185,255),highColor=Color3.fromRGB(255,205,80),zombieColor=Color3.fromRGB(255,100,100),
 		vehicleColor=Color3.fromRGB(255,165,65),playerColor=Color3.fromRGB(190,155,255)}}
@@ -179,12 +179,21 @@ end
 local function roster(kind,folder)
 	local seen={};local localChar=read(lp,"Character");local localName=read(lp,"Name","")
 	local byCharacter,byName={},{}
+	local models=children(folder);local registered={}
+	for _,model in ipairs(models)do registered[model]=true end
+	local playerCount,missingCharacters=0,0
 	if kind=="Character"then for _,player in ipairs(children(Players))do if isa(player,"Player")then
 		local name=read(player,"Name");local character=read(player,"Character")
 		local identity={username=name,displayName=read(player,"DisplayName",name)}
 		if character then byCharacter[character]=identity end;if name then byName[name]=identity end
+		if player~=lp then
+			playerCount=playerCount+1
+			if character and isa(character,"Model")and read(character,"Parent")then
+				if not registered[character]then models[#models+1]=character;registered[character]=true end
+			else missingCharacters=missingCharacters+1 end
+		end
 	end end end
-	for _,model in ipairs(children(folder))do
+	for _,model in ipairs(models)do
 		if isa(model,"Model")and model~=localChar and not(kind=="Character"and read(model,"Name")==localName)then
 			seen[model]=true;enqueue(kind,model,{name=read(model,"Name",kind)})
 			local entry=APP.groups[kind][model]or APP.pending[model]
@@ -197,6 +206,7 @@ local function roster(kind,folder)
 	for model,e in pairs(APP.groups[kind])do
 		if not seen[model]or not read(e.part,"Parent")then APP.groups[kind][model]=nil end
 	end
+	if kind=="Character"then APP.serverPlayers=playerCount;APP.missingCharacters=missingCharacters end
 end
 local function playerLabel(entry,includeUsername)
 	local label=entry.displayName or entry.username or entry.name
@@ -509,18 +519,26 @@ local function renderMap(view)
 	immediate.push_clip(Vector2.new(left,top),Vector2.new(right,bottom))
 	local entries,parts={},{}
 	if transform then
+		APP.mapAvailable=0;APP.mapLimited=0;APP.mapLoadedPlayers=0;APP.mapLoadedVehicles=0
 		for _,pair in ipairs({{"Character",C.mapPlayers},{"Vehicle",C.mapVehicles},{"Zombie",C.mapZombies}})do
 			if pair[2]then for _,e in pairs(APP.groups[pair[1]])do
-				if #entries<C.mapMaxDots then entries[#entries+1]=e;parts[#parts+1]=e.part end
+				APP.mapAvailable=APP.mapAvailable+1
+				if pair[1]=="Character"then APP.mapLoadedPlayers=APP.mapLoadedPlayers+1
+				elseif pair[1]=="Vehicle"then APP.mapLoadedVehicles=APP.mapLoadedVehicles+1 end
+				-- Map points never use world ESP ranges or the legacy optional-dot limit.
+				-- Keep the native command/transport safety boundary explicit for extreme scenes.
+				if #entries<2000 then entries[#entries+1]=e;parts[#parts+1]=e.part
+				else APP.mapLimited=APP.mapLimited+1 end
 			end end
 		end
-		APP.mapObjects=#entries
+		APP.mapObjects=#entries;APP.mapDrawn=0
 		for start=1,#parts,128 do
 			local chunk={};for i=start,math.min(#parts,start+127)do chunk[#chunk+1]=parts[i]end
 			local ok,poses=pcall(entities.get_parts_snapshot,chunk)
 			if ok then for j,pose in ipairs(poses.parts)do if pose then
 				local e=entries[start+j-1];local p=mapPoint(pose.cframe.Position,canvas,transform)
 				if p.X>=left and p.X<=right and p.Y>=top and p.Y<=bottom then
+					APP.mapDrawn=APP.mapDrawn+1
 					local color=e.kind=="Character"and C.playerColor or e.kind=="Vehicle"and C.vehicleColor or e.kind=="Zombie"and C.zombieColor or C.lootColor
 					immediate.circle(p,C.mapDotSize+1,true,false,Color3.new(0,0,0));immediate.circle(p,C.mapDotSize,true,false,color)
 					local labels=e.kind=="Character"and C.mapPlayerLabels or e.kind=="Vehicle"and C.mapVehicleLabels or e.kind=="Zombie"and C.mapZombieLabels
@@ -535,7 +553,9 @@ local function renderMap(view)
 		immediate.circle(p,10,false,false,Color3.new(1,1,1))
 	end
 	immediate.pop_clip()
-	text(Vector2.new(left,math.max(0,top-22)),transform and("MAP ESP | Loaded objects: "..(APP.mapObjects or 0))or(APP.mapStatus or "Map calibration pending"),Color3.new(1,1,1),12)
+	local summary="MAP | Players loaded: "..(APP.mapLoadedPlayers or 0).." / server: "..(APP.serverPlayers or 0).." | Vehicles: "..(APP.mapLoadedVehicles or 0)
+	if (APP.mapLimited or 0)>0 then summary=summary.." | Limited: "..APP.mapLimited end
+	text(Vector2.new(left,math.max(0,top-22)),transform and summary or(APP.mapStatus or "Map calibration pending"),Color3.new(1,1,1),12)
 end
 local function predictPoint(origin,position,velocity,speed,gravity)
 	if speed<=0 then return position,0 end
@@ -593,20 +613,23 @@ local function aimFrame(cf,view,focal)
 				motion.position=position;motion.at=now
 			end
 			local world=head.cframe.Position
-			if (world-cf.Position).Magnitude<=C.aimRange then
-				if C.prediction then world=predictPoint(cf.Position,world,motion.velocity*(C.predictionStrength/100),C.bulletSpeed,C.bulletGravity)end
+			local targetDistance=(world-cf.Position).Magnitude
+			if targetDistance<=C.aimRange then
+				local flightTime=0
+				if C.prediction then world,flightTime=predictPoint(cf.Position,world,motion.velocity*(C.predictionStrength/100),C.bulletSpeed,C.bulletGravity)end
 				local q=cf:PointToObjectSpace(world);local depth=-q.Z
 				if depth>.05 then
 					local point=Vector2.new(view.X/2+q.X*focal/depth,view.Y/2-q.Y*focal/depth)
 					local delta=point-center;local distance=delta.X*delta.X+delta.Y*delta.Y
 					if point.X>=0 and point.Y>=0 and point.X<=view.X and point.Y<=view.Y and distance<score then
-						score=distance;best={entry=e,point=point,world=world}
+						score=distance;best={entry=e,point=point,world=world,distance=targetDistance,flightTime=flightTime}
 					end
 				end
 			end
 		end
 	end
 	APP.aimTarget=best and best.entry.name or nil
+	APP.aimTargetDistance=best and best.distance or nil;APP.aimFlightTime=best and best.flightTime or nil
 	local okFocus,focused=pcall(input.is_window_focused)
 	local inputEnabled=true
 	if input.get_status then local okStatus,status=pcall(input.get_status);if okStatus and status then inputEnabled=status.enabled~=false end end
@@ -620,6 +643,14 @@ local function aimFrame(cf,view,focal)
 	end
 end
 local suffixes={Character="Players",Zombie="Zombies",Vehicle="Vehicles"}
+local mouseCodes={MB1=1,MB2=2,MB3=4,MB4=5,MB5=6}
+local function activationHeld()
+	local code=mouseCodes[C.aimBind]
+	if code then return input.is_mouse_down(code)end
+	if C.aimBind~="None"and Enum.KeyCode[C.aimBind]then return input.is_key_down(Enum.KeyCode[C.aimBind])end
+	return false
+end
+APP.activationHeld=activationHeld
 local function effectEnabled(kind)
 	local suffix=suffixes[kind]
 	for _,effect in ipairs({"names","box","tracer","chams","health"})do if C[effect..suffix]then return true end end
@@ -686,7 +717,11 @@ local function render()
 					if os.clock()>=(e.espHealthAt or 0)then
 						local humanoid=child(e.model,"Humanoid");e.espHp=read(humanoid,"Health");e.espMaxHp=read(humanoid,"MaxHealth");e.espHealthAt=os.clock()+.2
 					end
-					if e.espHp and e.espMaxHp and e.espMaxHp>0 then
+					-- Live AR2 sample: wounded player still reports Humanoid 100/100.
+					-- Never present this controller value as verified player combat health.
+					if e.kind=="Character"then
+						text(Vector2.new(left, bottom+2),"HP unavailable",Color3.fromRGB(160,160,160),10)
+					elseif e.espHp and e.espMaxHp and e.espMaxHp>0 then
 						local amount=math.clamp(e.espHp/e.espMaxHp,0,1)
 						immediate.rectangle(Vector2.new(left-6,top),Vector2.new(left-3,bottom),0,true,false,Color3.new(0,0,0))
 						immediate.rectangle(Vector2.new(left-5,bottom-h*amount),Vector2.new(left-4,bottom),0,true,false,Color3.new(1-amount,amount,0))
@@ -712,13 +747,7 @@ local function render()
 	end end end
 	if C.combat and APP.combat then text(Vector2.new(view.X/2-90,45),"IN COMBAT  "..short(APP.guiValues.combatTime),Color3.fromRGB(255,90,90),14)end
 	if C.hud and not APP.mapOpen then text(Vector2.new(15,view.Y-38),"AR2 JoX | "..short(APP.zone).." | Players "..#APP.nearby.Character,C.playerColor,12)end
-	local okHeld,held=pcall(function()
-		if C.aimBind=="MB2"then return input.is_mouse_down(Enum.KeyCode.RightButton)
-		elseif C.aimBind=="MB1"then return input.is_mouse_down(Enum.KeyCode.LeftButton)
-		elseif C.aimBind=="MB3"then return input.is_mouse_down(Enum.KeyCode.MiddleButton)
-		elseif C.aimBind~="None"and Enum.KeyCode[C.aimBind]then return UIS:IsKeyDown(Enum.KeyCode[C.aimBind])end
-		return false
-	end)
+	local okHeld,held=pcall(activationHeld)
 	APP.aimHeld=okHeld and held==true
 	aimFrame(cf,view,focal)
 	APP.poseMs=(os.clock()-started)*1000
@@ -751,7 +780,8 @@ if ok and type(lib)=="table"and lib.NewWindow then
 	toggle(f,"aimEnabled","Enable aim assist");toggle(f,"showFov","Show FOV");slider(f,"fovRadius","FOV radius (pixels)",20,600)
 	toggle(f,"aimPlayers","Target characters");toggle(f,"aimZombies","Target zombies")
 	slider(f,"aimSmooth","Aim smoothing",0,30);slider(f,"aimRange","Aim range (studs)",100,5000)
-	APP.controls.aimBind=f:AddKeybind({text="Aim bind (hold)",flag="aimBind",default=C.aimBind,mode="Hold",onChanged=function(v)C.aimBind=v end})
+	APP.controls.aimBind=f:AddKeybind({text="Aim activation (hold)",flag="aimBind",default=C.aimBind,mode="Hold",onChanged=function(key)C.aimBind=key end})
+	f:AddParagraph({text="Click the bind field and press a key or mouse button. MB4 and MB5 capture the side buttons through native Windows input. MB2 remains the default."})
 	APP.controls.fovColor=f:AddColorPicker({text="FOV color",flag="fovColor",default=C.fovColor,callback=function(v)C.fovColor=v end})
 	f:AddLabel({get=function()return APP.aimHeld and "Bind: held"or "Bind: released"end})
 	f:AddParagraph({text="Hold the bind to aim at the nearest projected head inside the FOV. Missing heads use the root. Zero smoothing snaps. Characters are not classified as enemies or allies; this version has no verified wall visibility filter."})
@@ -762,13 +792,15 @@ if ok and type(lib)=="table"and lib.NewWindow then
 	slider(p,"bulletGravity","Bullet gravity (studs / second squared)",0,500)
 	p:AddLabel({get=function()return "Aim: "..(APP.aimStatus or "Waiting")end})
 	p:AddLabel({get=function()return "Target: "..(APP.aimTarget or "None")end})
+	p:AddLabel({get=function()return APP.aimTargetDistance and string.format("Distance: %.0f studs | Flight: %.1f ms",APP.aimTargetDistance,(APP.aimFlightTime or 0)*1000)or "Distance / flight: no target"end})
 	p:AddParagraph({text="Prediction estimates target velocity from fresh poses and solves travel time. Speed is a manual placeholder, not measured weapon data. Gravity zero adds no drop. Configure both for your weapon; prediction excludes drag and network latency."})
 	for _,a in ipairs({{"mapEnabled","Map ESP"},{"mapPlayers","Player dots"},{"mapVehicles","Vehicle dots"},{"mapZombies","Zombie dots"}})do toggle(m,a[1],a[2])end
 	local ml=mapTab:NewSection("Dot labels","left")
 	toggle(ml,"mapPlayerLabels","Player display names");toggle(ml,"mapUsername","Also show player @username")
 	toggle(ml,"mapVehicleLabels","Vehicle labels");toggle(ml,"mapZombieLabels","Zombie labels")
 	ml:AddParagraph({text="Player labels show the actual DisplayName when the replicated Player can be matched to its character. Username is an optional addition. Unknown identities fall back to the character model name."})
-	slider(m,"mapDotSize","Dot size",2,8);slider(m,"mapMaxDots","Maximum loaded dots",32,2000)
+	slider(m,"mapDotSize","Dot size",2,8)
+	m:AddParagraph({text="Map dots cover every available loaded position across the map, independently of world ESP range. No optional category budget applies. Up to 2000 total markers fit the native frame budget. Missing/unloaded objects have no readable position."})
 	m:AddButton({text="Sync: original map is open",callback=function()APP.mapOpen=true;lib:SetVisible(false)end})
 	m:AddButton({text="Sync: original map is closed",callback=function()APP.mapOpen=false end})
 	local mc=mapTab:NewSection("Alignment","right")
@@ -794,6 +826,7 @@ if ok and type(lib)=="table"and lib.NewWindow then
 	chams:AddParagraph({text="Native body-part silhouettes, up to 32 actors and 16 parts each. They do not test engine depth. Vehicles use their anchor volume."})
 	local hp=visuals:NewSection("Health bars","left")
 	for _,kind in ipairs({"Players","Zombies"})do toggle(hp,"health"..kind,kind.." health bars")end
+	hp:AddParagraph({text="AR2 player Humanoid health can stay 100/100 even when wounded. Player health shows unavailable until a verified combat-health source is supported. Zombie bars use readable Humanoid values."})
 	local r=visuals:NewSection("Range and colors","right")
 	for _,a in ipairs({{"zombieRange","Zombie range"},{"vehicleRange","Vehicle range"},{"characterRange","Player range"}})do slider(r,a[1],a[2],50,3000)end
 	for _,a in ipairs({{"zombieColor","Zombies"},{"vehicleColor","Vehicles"},{"playerColor","Players"}})do
@@ -826,6 +859,8 @@ else warn("[AR2_JOX] JoX UI unavailable; core remains active: "..tostring(lib))e
 if APP.window then
 	local restored,raw=pcall(function()return buffer.tostring(fs.read_async(autoConfigPath))end)
 	if restored then local okRestore,err=pcall(function()APP.window:ImportConfig(raw)end);if not okRestore then APP.configSaveError=cleanText(err)end end
+	-- Previous text-input controls saved a Toggle mode; aim activation remains hold-to-aim.
+	if APP.controls.aimBind then APP.controls.aimBind:SetMode("Hold")end
 	APP.saveConfig()
 end
 if APP.mapOpen and APP.Library then APP.Library:SetVisible(false)end
@@ -839,7 +874,7 @@ while running()do
 		if now>=due.membership then
 			roster("Zombie",child(workspace,"Zombies"));roster("Character",child(workspace,"Characters"));due.membership=now+1
 		end
-		if now>=due.vehicle then roster("Vehicle",child(workspace,"Vehicles"));due.vehicle=now+3 end
+		if now>=due.vehicle then roster("Vehicle",child(workspace,"Vehicles"));due.vehicle=now+1 end
 		if APP.rescan and not APP.scan then APP.nextWorld=0;APP.rescan=false end
 		if not APP.scan and now>=(APP.nextWorld or 0)then beginScan()end
 		worldStep();resolveJobs()

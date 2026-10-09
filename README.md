@@ -96,7 +96,7 @@ Every builder takes an options table and returns a handle. Shared options: `text
 | `AddDropdown` | Nonempty `options`, `default`; selected string. |
 | `AddMultiSelect` | `options`, `default` list; callback gets a copy of selected strings. |
 | `AddInput` | `default`, `placeholder`, `maxLength`; `numeric=true` enables number validation with `min`, `max`, `step`. |
-| `AddKeybind` | `default` key name/Enum.KeyCode or `MB1`/`MB2`/`MB3`; `mode="Toggle"`, `"Hold"`, or `"Press"`. `callback` receives activation state; `onChanged` receives a newly assigned key. |
+| `AddKeybind` | `default` key name/Enum.KeyCode or `MB1` through `MB5`; `mode="Toggle"`, `"Hold"`, or `"Press"`. `callback` receives activation state; `onChanged` receives a newly assigned key. |
 | `AddColorPicker` | `default=Color3` or RGB list in 0–255; drag saturation/brightness and hue, pick swatches, edit RGB channels or `#RRGGBB`, copy HEX; callback receives Color3. |
 | `AddButton` | `callback` runs on click; `style="secondary"`, `"primary"` or `"danger"`; no value. |
 | `AddLabel` | Static `text` or dynamic `get=function() return text end`. |
@@ -189,3 +189,9 @@ Offline tests cover stale/moved aim checks, visual retention, native snapshot ex
 ### App-native memory limit (Jael X 1.31.4)
 
 The Phantom Forces script no longer contains a memory budget slider or script-owned ceiling. Configure Settings > General > Script memory limit in Jael X 1.31.4, from 0.25 to 4 GB (default 0.50 GB). The app enforces it per worker on the next execution; it does not reserve RAM or control Roblox/shader memory. Compact snapshots and rate-limited queries remain unchanged. Older script memory flags are ignored when loading profiles.
+
+### JoX Library 1.1.5: native side-button bind capture
+
+Click an AddKeybind field and press Mouse4 or Mouse5; the usual capture workflow now accepts MB4/MB5 alongside keyboard keys and MB1–MB3. Side-button edges are polled through Jael's native input.is_mouse_down(5/6), share the existing capture and Hold/Toggle/Press dispatcher, and release Hold state when the native read returns false. Methods and config flags remain unchanged. GetState() now returns false for a released keybind rather than its key-name string.
+
+The Apocalypse Rising2 example restores the normal aim keybind field and removes the separate mouse dropdown. Player health is marked unavailable because a live wounded-player sample still reported Humanoid100/100; this controller value is not presented as verified combat health.

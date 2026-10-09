@@ -10,7 +10,7 @@ local HTTP = game:GetService("HttpService")
 assert(immediate and immediate.push_clip and font, "JoX Library requires Jael X with clipping support")
 local previous=shared.JoXLibrary or shared.JaelDrawingUI
 if previous and previous.Unload then pcall(function() previous:Unload() end) end
-local Library = { Version = "1.1.4", Windows = {}, Connections = {}, Alive = true, Visible = true, ToggleKey = "RightControl",
+local Library = { Version = "1.1.5", Windows = {}, Connections = {}, Alive = true, Visible = true, ToggleKey = "RightControl",
 	Rounding = 2, Notifications = true, NotificationDuration = 4, NotificationPosition = "Bottom right" }
 shared.JaelDrawingUI = Library
 shared.JoXLibrary = Library
@@ -114,7 +114,7 @@ local function normalize(control,value)
 		return result
 	end
 	if control.kind=="keybind" then
-		value=keyName(value);assert(value=="None" or value:match("^MB[123]$") or pcall(function() assert(Enum.KeyCode[value]) end),"Unknown key")
+		value=keyName(value);assert(value=="None" or value:match("^MB[1-5]$") or pcall(function() assert(Enum.KeyCode[value]) end),"Unknown key")
 		return value
 	end
 	assert(type(value)=="string","Expected text")
@@ -180,7 +180,7 @@ local function element(section,kind,opts)
 	function h:SetVisible(v) c.visible=not not v;return self end
 	function h:SetDisabled(v) c.disabled=not not v;return self end
 	function h:SetTooltip(v) c.tooltip=v;return self end
-	function h:GetState() return kind=="keybind" and c.active or c.value end
+	function h:GetState() if kind=="keybind"then return c.active end;return c.value end
 	function h:SetOptions(options,keepSelection)
 		assert(kind=="dropdown" and #options>0,"Expected nonempty dropdown options")
 		c.options=copy(options)
@@ -672,9 +672,9 @@ local chars={Space=" ",Minus="-",Equals="=",Period=".",Comma=",",Slash="/",BackS
 local shifted={Space=" ",Minus="_",Equals="+",Period=">",Comma="<",Slash="?",BackSlash="|",Semicolon=":",Quote='"',LeftBracket="{",RightBracket="}",Backquote="~"}
 local digits={Zero="0",One="1",Two="2",Three="3",Four="4",Five="5",Six="6",Seven="7",Eight="8",Nine="9"}
 local shiftDigits={Zero=")",One="!",Two="@",Three="#",Four="$",Five="%",Six="^",Seven="&",Eight="*",Nine="("}
-Library.Connections[#Library.Connections+1]=UIS.InputBegan:Connect(function(e)
+local function dispatchBegan(name,isKeyboard)
 	if not running() then return end
-	mouse=UIS:GetMouseLocation();local name=inputName(e)
+	mouse=UIS:GetMouseLocation()
 	if keyStates[name] then return end;keyStates[name]=true
 	if capture then
 		if name=="Escape" then capture=nil;return end
@@ -688,7 +688,7 @@ Library.Connections[#Library.Connections+1]=UIS.InputBegan:Connect(function(e)
 		if w and w.visible and not w.minimized then w.searchControl=w.searchControl or {kind="input",maxLength=64,window=w};startEdit(w.searchControl,function(v)w:SetSearch(v)end,w.query)end
 		return
 	end
-	if editing and e.UserInputType==Enum.UserInputType.Keyboard then
+	if editing and isKeyboard then
 		if name=="Return" then editCommit();return end
 		if name=="Escape" then editing=nil;return end
 		local ctrl=UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.RightControl)
@@ -716,12 +716,22 @@ Library.Connections[#Library.Connections+1]=UIS.InputBegan:Connect(function(e)
 		elseif c.mode=="Hold" then c.active=true;callback(c.callback,true)
 		else callback(c.callback,true) end
 	end end end
-end)
-Library.Connections[#Library.Connections+1]=UIS.InputEnded:Connect(function(e)
-	local name=inputName(e);keyStates[name]=nil
+end
+Library.Connections[#Library.Connections+1]=UIS.InputBegan:Connect(function(e)dispatchBegan(inputName(e),e.UserInputType==Enum.UserInputType.Keyboard)end)
+local function dispatchEnded(name)
+	keyStates[name]=nil
 	if name=="MB1" then drag=nil;slider=nil end
 	for _,w in ipairs(Library.Windows) do for _,c in pairs(w.flags) do if c.kind=="keybind" and c.mode=="Hold" and c.value==name and c.active then c.active=false;callback(c.callback,false) end end end
-end)
+end
+Library.Connections[#Library.Connections+1]=UIS.InputEnded:Connect(function(e)dispatchEnded(inputName(e))end)
+local function pollSideButtons()
+	if type(input)~="table"or type(input.is_mouse_down)~="function"then return end
+	for _,button in ipairs({{"MB4",5},{"MB5",6}})do
+		local ok,held=pcall(input.is_mouse_down,button[2]);held=ok and held==true
+		if held and not keyStates[button[1]]then dispatchBegan(button[1],false)
+		elseif not held and keyStates[button[1]]then dispatchEnded(button[1])end
+	end
+end
 Library.Connections[#Library.Connections+1]=UIS.InputChanged:Connect(function(e)
 	if not running() or not Library.Visible or e.UserInputType~=Enum.UserInputType.MouseWheel then return end
 	mouse=UIS:GetMouseLocation()
@@ -731,6 +741,7 @@ end)
 Library.Connections[#Library.Connections+1]=RS.PreRender:Connect(function()
 	if not running() then return end
 	local ok,err=pcall(function()
+		pollSideButtons()
 		hits={};mouse=UIS:GetMouseLocation();local view=Drawing3D.GetViewportSize()
 		if drag then
 			local w=drag.window
