@@ -51,10 +51,11 @@ if not supported()then warn("[AR2_JOX] Open Apocalypse Rising 2 before running t
 local APP={alive=true,connections={},groups={Zombie={},Character={},Vehicle={},Loot={},Zone={}},zones={},controls={},
 	nearby={Zombie={},Character={},Vehicle={},Loot={},Zone={}},faults=0,scanNodes=0,scanOverflow=0,poseMs=0,gui={},guiValues={},
 	config={esp=true,loot=false,zombies=false,vehicles=false,characters=true,highValue=false,search="",categories={},
-		aimEnabled=true,showFov=true,fovRadius=120,aimBind="MB2",aimPlayers=true,aimZombies=false,aimSmooth=0,aimRange=1500,
+		ignoreParty=true,partyColorEnabled=true,partyColor=Color3.fromRGB(90,220,155),aimEnabled=true,showFov=true,fovRadius=120,aimBind="MB2",aimPlayers=true,aimZombies=false,aimSmooth=0,aimRange=1500,
 		prediction=true,predictionStrength=100,bulletSpeed=6000,bulletGravity=0,fovColor=Color3.fromRGB(220,220,230),
 		lootRange=600,zombieRange=800,vehicleRange=1200,characterRange=1000,labels=48,fontSize=12,distance=true,tags=true,
-		mapEnabled=true,mapPlayers=true,mapVehicles=true,mapZombies=false,mapLoot=false,mapPlayerLabels=true,mapVehicleLabels=true,mapZombieLabels=true,mapUsername=false,mapDotSize=4,mapMaxDots=512,mapOffsetX=0,mapOffsetY=0,mapSizeScale=1,
+		mapEnabled=true,mapPlayers=true,mapVehicles=true,mapZombies=false,mapLoot=false,mapPlayerLabels=true,mapPlayerDistance=true,mapVehicleLabels=true,mapZombieLabels=true,mapUsername=false,mapDotSize=4,mapMaxDots=512,mapOffsetX=0,mapOffsetY=0,mapSizeScale=1,
+		brightLighting=false,noDistanceFog=false,noShadows=false,sceneBrightness=3,
 		markers=true,combat=true,hud=true,panelZombies=true,panelPlayers=true,panelVehicles=true,
 		lootColor=Color3.fromRGB(110,185,255),highColor=Color3.fromRGB(255,205,80),zombieColor=Color3.fromRGB(255,100,100),
 		vehicleColor=Color3.fromRGB(255,165,65),playerColor=Color3.fromRGB(190,155,255)}}
@@ -65,6 +66,34 @@ ENV.AR2_JOX_OPTIONS=nil
 if type(options.aimEnabled)=="boolean"then C.aimEnabled=options.aimEnabled end
 if type(options.mapOpen)=="boolean"then APP.mapOpen=options.mapOpen else APP.mapOpen=previousMapOpen==true end
 local HTTP=game:GetService("HttpService")
+local Lighting=game:GetService("Lighting")
+local lightingOriginal={}
+local lightingFields={Brightness=true,Ambient=true,OutdoorAmbient=true,FogStart=true,FogEnd=true,GlobalShadows=true}
+local function restoreLighting()
+	for property,value in pairs(lightingOriginal)do pcall(function()Lighting[property]=value end)end
+	lightingOriginal={}
+end
+local function updateLighting()
+	local desired={}
+	if C.brightLighting then desired.Brightness=C.sceneBrightness;desired.Ambient=Color3.new(.8,.8,.8);desired.OutdoorAmbient=Color3.new(.8,.8,.8)end
+	if C.noDistanceFog then desired.FogStart=1000000;desired.FogEnd=1000000 end
+	if C.noShadows then desired.GlobalShadows=false end
+	for property in pairs(lightingFields)do
+		local value=desired[property]
+		if value~=nil then
+			local supported,allowed=pcall(function()return Lighting:CanWriteProperty(property)end)
+			if supported and allowed then
+				if lightingOriginal[property]==nil then lightingOriginal[property]=read(Lighting,property)end
+				if lightingOriginal[property]~=nil then
+					local ok,err=pcall(function()Lighting[property]=value end);if not ok then APP.lightingStatus=cleanText(err)end
+				end
+			else APP.lightingStatus="Unavailable: "..property end
+		elseif lightingOriginal[property]~=nil then
+			local ok=pcall(function()Lighting[property]=lightingOriginal[property]end)
+			if ok then lightingOriginal[property]=nil end
+		end
+	end
+end
 local autoConfigPath="JaelConfigs/ar2-auto-config.json"
 local lastSavedConfig
 function APP.saveConfig()
@@ -123,6 +152,7 @@ local function text(p,label,col,size)immediate.text(p,cleanText(label),fontAt(si
 function APP.stop()
 	if not APP.alive then return end
 	if APP.saveConfig then APP.saveConfig()end
+	restoreLighting()
 	APP.alive=false
 	for _,c in ipairs(APP.connections)do pcall(function()c:Disconnect()end)end
 	if APP.Library then pcall(function()APP.Library:Unload()end)end
@@ -208,12 +238,52 @@ local function roster(kind,folder)
 	end
 	if kind=="Character"then APP.serverPlayers=playerCount;APP.missingCharacters=missingCharacters end
 end
+-- AR2 squad rows contain usernames in NameLabel.ContentText even while the list is closed.
+local function refreshParty()
+	local list=path(child(lp,"PlayerGui"),"PlayerList/MainList/SquadList/ScrollingFrame")
+	local names={};local count,unresolved=0,0
+	local byName,byDisplay={},{}
+	for _,player in ipairs(children(Players))do if isa(player,"Player")then
+		local name=read(player,"Name");local display=read(player,"DisplayName")
+		if name then byName[name:lower()]=name end
+		if display then local key=display:lower();if byDisplay[key]==nil then byDisplay[key]=name else byDisplay[key]=false end end
+	end end
+	local noSquad=child(list,"NoSquad")
+	if list and read(noSquad,"Visible")==true then
+		APP.partyNames={};APP.partyCount=0;APP.partyReady=true;APP.partyStatus="No party";return
+	end
+	for _,row in ipairs(children(list))do if isa(row,"Frame")and read(row,"Name")~="NoSquad"and read(row,"Visible")~=false then
+		local label=path(row,"NameButton/NameLabelBin/NameLabel")
+		if label then
+			local value=read(label,"ContentText")or read(label,"Text")
+			local key=type(value)=="string"and value:match("^%s*(.-)%s*$"):gsub("^@",""):lower()or nil
+			local name=key and(byName[key]or byDisplay[key])
+			if name then if not names[name]then names[name]=true;count=count+1 end else unresolved=unresolved+1 end
+		end
+	end end
+	APP.partyNames=names;APP.partyCount=count
+	APP.partyReady=list~=nil and unresolved==0 and count>0
+	APP.partyStatus=APP.partyReady and("Party: "..count.." member(s)")or "Party unreadable: player aim paused"
+end
+local function isParty(entry)return entry.kind=="Character"and entry.username and APP.partyNames and APP.partyNames[entry.username]==true or false end
+local function canAimAt(entry)
+	return entry.kind~="Character"or not C.ignoreParty or(APP.partyReady==true and type(entry.username)=="string"and not isParty(entry))
+end
+local function entryColor(entry)
+	if entry.kind=="Character"then return C.partyColorEnabled and isParty(entry)and C.partyColor or C.playerColor end
+	return entry.kind=="Vehicle"and C.vehicleColor or entry.kind=="Zombie"and C.zombieColor or C.lootColor
+end
+APP.refreshParty=refreshParty;APP.isParty=isParty;APP.canAimAt=canAimAt;APP.entryColor=entryColor
 local function playerLabel(entry,includeUsername)
 	local label=entry.displayName or entry.username or entry.name
 	if includeUsername and entry.username then label=label.." (@"..entry.username..")"end
 	return label
 end
 APP.playerLabel=playerLabel
+local function distanceLabel(position,origin)
+	return tostring(math.floor((position-origin).Magnitude)).."m"
+end
+APP.distanceLabel=distanceLabel
 local priority={Firearms=true,Ammo=true,Medical=true,MeleeWeapons=true,Backpacks=true,VehicleParts=true,Attachments=true,Winchester=true}
 local zones={{"Radar","Military relay"},{"Military","Military site"},{"Airport","Airport"},{"Airfield","Airport"},
 	{"Airstrip","Airstrip"},{"Huron","Huron"},{"University","University"},{"Monastery","Monastery"},
@@ -539,10 +609,14 @@ local function renderMap(view)
 				local e=entries[start+j-1];local p=mapPoint(pose.cframe.Position,canvas,transform)
 				if p.X>=left and p.X<=right and p.Y>=top and p.Y<=bottom then
 					APP.mapDrawn=APP.mapDrawn+1
-					local color=e.kind=="Character"and C.playerColor or e.kind=="Vehicle"and C.vehicleColor or e.kind=="Zombie"and C.zombieColor or C.lootColor
+					local color=entryColor(e)
 					immediate.circle(p,C.mapDotSize+1,true,false,Color3.new(0,0,0));immediate.circle(p,C.mapDotSize,true,false,color)
 					local labels=e.kind=="Character"and C.mapPlayerLabels or e.kind=="Vehicle"and C.mapVehicleLabels or e.kind=="Zombie"and C.mapZombieLabels
-					if labels then text(p+Vector2.new(C.mapDotSize+3,-8),e.kind=="Character"and playerLabel(e,C.mapUsername)or e.name,color,11)end
+					local label=labels and(e.kind=="Character"and playerLabel(e,C.mapUsername)or e.name)or ""
+					if e.kind=="Character"and C.mapPlayerDistance and localPosition then
+						label=label..(label~=""and "  "or "")..distanceLabel(pose.cframe.Position,localPosition)
+					end
+					if label~=""then text(p+Vector2.new(C.mapDotSize+3,-8),label,color,11)end
 				end
 			end end end
 		end
@@ -584,7 +658,7 @@ local function aimFrame(cf,view,focal)
 	local candidates={}
 	for _,pair in ipairs({{"Character",C.aimPlayers},{"Zombie",C.aimZombies}})do if pair[2]then
 		for _,e in pairs(APP.groups[pair[1]])do
-			candidates[#candidates+1]=e
+			if canAimAt(e)then candidates[#candidates+1]=e end
 		end
 	end end
 	table.sort(candidates,function(a,b)return(a.distance or math.huge)<(b.distance or math.huge)end)
@@ -679,7 +753,7 @@ local function render()
 			end
 		end
 	end
-	local chamsGroups={Character={},Zombie={},Vehicle={}}
+	local chamsGroups={Character={},Party={},Zombie={},Vehicle={}}
 	local chamsCount=0
 	local ok,snapshot=pcall(entities.get_parts_snapshot,parts)
 	if ok then for i,e in ipairs(entries)do
@@ -689,7 +763,7 @@ local function render()
 			if depth>.05 then
 				local x,y=view.X/2+q.X*focal/depth,view.Y/2-q.Y*focal/depth
 				local suffix=suffixes[e.kind]
-				local col=e.kind=="Zombie"and C.zombieColor or e.kind=="Vehicle"and C.vehicleColor or C.playerColor
+				local col=entryColor(e)
 				local height=e.kind=="Vehicle"and math.max(3,pose.size.Y)or 6
 				local width=e.kind=="Vehicle"and math.max(4,pose.size.X)or 3
 				local h,w=math.clamp(height*focal/depth,4,view.Y*2),math.clamp(width*focal/depth,3,view.X*2)
@@ -705,7 +779,7 @@ local function render()
 				end
 				if C["names"..suffix]then
 					local label=e.kind=="Character"and playerLabel(e,false)or e.name
-					if C.distance then label=label.."  "..math.floor((pose.cframe.Position-(APP.origin or cf.Position)).Magnitude).." studs"end
+					if e.kind=="Character"and C.distance then label=label.."  "..distanceLabel(pose.cframe.Position,read(APP.localRoot,"Position")or APP.origin or cf.Position)end
 					local measured=immediate.calculate_text_size(label,fontAt(C.fontSize))
 					text(Vector2.new(x-measured.X/2,top-measured.Y-3),label,col)
 				end
@@ -735,13 +809,14 @@ local function render()
 						end end
 						if #e.chamsParts==0 then e.chamsParts={e.part}end;e.chamsRefreshAt=os.clock()+2
 					end
-					chamsGroups[e.kind][#chamsGroups[e.kind]+1]={Root=e.part,Parts=e.chamsParts};chamsCount=chamsCount+1
+					local group=C.partyColorEnabled and isParty(e)and "Party"or e.kind
+					chamsGroups[group][#chamsGroups[group]+1]={Root=e.part,Parts=e.chamsParts};chamsCount=chamsCount+1
 				end
 			end
 		end
 	end else APP.faults=APP.faults+1 end
 	if type(entities.draw_chams_batch)=="function"then for kind,actors in pairs(chamsGroups)do if #actors>0 then
-		local color=kind=="Zombie"and C.zombieColor or kind=="Vehicle"and C.vehicleColor or C.playerColor
+		local color=kind=="Party"and C.partyColor or kind=="Zombie"and C.zombieColor or kind=="Vehicle"and C.vehicleColor or C.playerColor
 		local success,metrics=pcall(entities.draw_chams_batch,actors,{Color=color,Transparency=C.chamsOpacity/100,OutlineColor=color,OutlineTransparency=1,Thickness=1,Filled=true,Outlined=true})
 		if not success then APP.chamsError=cleanText(metrics)end
 	end end end
@@ -779,12 +854,14 @@ if ok and type(lib)=="table"and lib.NewWindow then
 	local f=combat:NewSection("Aim FOV","left")
 	toggle(f,"aimEnabled","Enable aim assist");toggle(f,"showFov","Show FOV");slider(f,"fovRadius","FOV radius (pixels)",20,600)
 	toggle(f,"aimPlayers","Target characters");toggle(f,"aimZombies","Target zombies")
+	toggle(f,"ignoreParty","Exclude party from aim")
+	f:AddLabel({get=function()return APP.partyStatus or "Reading party"end})
 	slider(f,"aimSmooth","Aim smoothing",0,30);slider(f,"aimRange","Aim range (studs)",100,5000)
 	APP.controls.aimBind=f:AddKeybind({text="Aim activation (hold)",flag="aimBind",default=C.aimBind,mode="Hold",onChanged=function(key)C.aimBind=key end})
 	f:AddParagraph({text="Click the bind field and press a key or mouse button. MB4 and MB5 capture the side buttons through native Windows input. MB2 remains the default."})
 	APP.controls.fovColor=f:AddColorPicker({text="FOV color",flag="fovColor",default=C.fovColor,callback=function(v)C.fovColor=v end})
 	f:AddLabel({get=function()return APP.aimHeld and "Bind: held"or "Bind: released"end})
-	f:AddParagraph({text="Hold the bind to aim at the nearest projected head inside the FOV. Missing heads use the root. Zero smoothing snaps. Characters are not classified as enemies or allies; this version has no verified wall visibility filter."})
+	f:AddParagraph({text="Hold the bind to aim at the nearest projected head inside the FOV. Missing heads use the root. Zero smoothing snaps. Party members are excluded by default. If the squad list cannot be resolved, player aim pauses for safety. This version has no verified wall visibility filter."})
 	local p=combat:NewSection("Projectile prediction","right")
 	toggle(p,"prediction","Predict target movement")
 	slider(p,"predictionStrength","Movement prediction (%)",0,200)
@@ -797,6 +874,7 @@ if ok and type(lib)=="table"and lib.NewWindow then
 	for _,a in ipairs({{"mapEnabled","Map ESP"},{"mapPlayers","Player dots"},{"mapVehicles","Vehicle dots"},{"mapZombies","Zombie dots"}})do toggle(m,a[1],a[2])end
 	local ml=mapTab:NewSection("Dot labels","left")
 	toggle(ml,"mapPlayerLabels","Player display names");toggle(ml,"mapUsername","Also show player @username")
+	toggle(ml,"mapPlayerDistance","Player distance (m)")
 	toggle(ml,"mapVehicleLabels","Vehicle labels");toggle(ml,"mapZombieLabels","Zombie labels")
 	ml:AddParagraph({text="Player labels show the actual DisplayName when the replicated Player can be matched to its character. Username is an optional addition. Unknown identities fall back to the character model name."})
 	slider(m,"mapDotSize","Dot size",2,8)
@@ -813,7 +891,7 @@ if ok and type(lib)=="table"and lib.NewWindow then
 	local v=visuals:NewSection("Names and distance","left")
 	toggle(v,"esp","Enable ESP")
 	for _,kind in ipairs({"Players","Zombies","Vehicles"})do toggle(v,"names"..kind,kind.." names")end
-	toggle(v,"distance","Distance labels");slider(v,"fontSize","Text size",9,20);slider(v,"labels","Maximum entities",8,128)
+	toggle(v,"distance","Player distance (m)");slider(v,"fontSize","Text size",9,20);slider(v,"labels","Maximum entities",8,128)
 	local boxes=visuals:NewSection("Boxes","right")
 	for _,kind in ipairs({"Players","Zombies","Vehicles"})do toggle(boxes,"box"..kind,kind.." boxes")end
 	toggle(boxes,"boxCorners","Corner boxes");toggle(boxes,"boxFilled","Filled boxes")
@@ -832,6 +910,10 @@ if ok and type(lib)=="table"and lib.NewWindow then
 	for _,a in ipairs({{"zombieColor","Zombies"},{"vehicleColor","Vehicles"},{"playerColor","Players"}})do
 		local key=a[1];APP.controls[key]=r:AddColorPicker({text=a[2],flag=key,default=C[key],callback=function(value)C[key]=value end})
 	end
+	local party=visuals:NewSection("Party","left")
+	toggle(party,"partyColorEnabled","Use party ESP color")
+	APP.controls.partyColor=party:AddColorPicker({text="Party color",flag="partyColor",default=C.partyColor,callback=function(value)C.partyColor=value end})
+	party:AddLabel({get=function()return APP.partyStatus or "Reading party"end})
 	local st=status:NewSection("Character and server","left")
 	st:AddLabel({get=function()return "Zone: "..short(APP.zone)end})
 	st:AddLabel({get=function()return "Health: "..short(APP.hp).." / "..short(APP.maxHp)end})
@@ -852,6 +934,11 @@ if ok and type(lib)=="table"and lib.NewWindow then
 	local u=utilities:NewSection("Information HUD","left")
 	for _,a in ipairs({{"hud","Status HUD"},{"combat","Combat warning"},{"panelZombies","Nearest zombies"},{"panelPlayers","Nearest characters"},{"panelVehicles","Nearest vehicles"}})do toggle(u,a[1],a[2])end
 	local d=utilities:NewSection("Runtime","right")
+	local lighting=utilities:NewSection("Lighting","left")
+	toggle(lighting,"brightLighting","Bright lighting");slider(lighting,"sceneBrightness","Brightness",0,10)
+	toggle(lighting,"noDistanceFog","Remove distance fog");toggle(lighting,"noShadows","Disable global shadows")
+	lighting:AddLabel({get=function()return APP.lightingStatus or "Supported values restore when disabled or unloaded"end})
+	lighting:AddParagraph({text="Bright lighting does not change the day/night clock. Distance fog affects FogStart/FogEnd only; Atmosphere haze remains unsupported by the current native setter."})
 	d:AddLabel({get=function()return string.format("ESP callback: %.2f ms | Read faults: %d",APP.poseMs,APP.faults)end})
 	d:AddParagraph({text="RightControl toggles the menu. F6 toggles ESP. End unloads. GUI-derived fields show Unavailable when the exact game profile cannot read them."})
 	d:AddButton({text="Unload script",style="danger",callback=APP.stop})
@@ -864,13 +951,17 @@ if APP.window then
 	APP.saveConfig()
 end
 if APP.mapOpen and APP.Library then APP.Library:SetVisible(false)end
-local due={membership=0,vehicle=0,info=0,rank=0,save=0}
+local due={membership=0,vehicle=0,info=0,rank=0,save=0,lighting=0,party=0}
+refreshParty()
+print("[AR2_JOX] "..APP.partyStatus)
 print("[AR2_JOX] Loaded; RightControl menu, F6 ESP, End unload")
 while running()do
 	if not supported()then APP.stop();break end
 	local ok,err=pcall(function()
 		local now=os.clock()
 		if now>=due.save then APP.saveConfig();due.save=now+.75 end
+		if now>=due.lighting then updateLighting();due.lighting=now+.5 end
+		if now>=due.party then refreshParty();due.party=now+.25 end
 		if now>=due.membership then
 			roster("Zombie",child(workspace,"Zombies"));roster("Character",child(workspace,"Characters"));due.membership=now+1
 		end
