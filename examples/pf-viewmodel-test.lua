@@ -158,12 +158,13 @@ function APP.stop()
 	print("[PF_VIEWMODEL_TEST] restored and unloaded.")
 end
 APP.connections[1]=game:GetService("UserInputService").InputBegan:Connect(function(event)if event.KeyCode.Name=="F4"then APP.stop()end end)
-print("[PF_VIEWMODEL_TEST] Full bright + pink ambient. Viewmodel changes disabled pending animation-safe support. F4 restores. Change shared.PF_VIEWMODEL_TEST.config and call refreshViewmodel() to test materials.")
-local nextReport=0
+print("[PF_VIEWMODEL_TEST] Full bright + pink ambient. Viewmodel color/material changes are unavailable. F4 restores and unloads.")
+local lastReport=nil
 while running()do
-	if os.clock()>=nextReport then
-		nextReport=os.clock()+5
-		print("[PF_VIEWMODEL_TEST] "..(APP.stats.viewmodelError or ((APP.stats.viewmodelParts or 0).." tracked parts")))
+	local message=APP.stats.environmentError or APP.stats.viewmodelError
+	if message and message~=lastReport then
+		lastReport=message
+		print("[PF_VIEWMODEL_TEST] "..message)
 	end
 	task.wait(.5)
 end
