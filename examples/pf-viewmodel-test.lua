@@ -18,7 +18,7 @@ APP.config=CFG
 --=========================== LOCAL VIEWMODEL ==========================--
 -- Camera children are used instead of obfuscated model names. Arm models have
 -- a direct BasePart named Arm; the current weapon is the unique other mesh model.
-local viewmodelAppearanceReady=false
+local viewmodelAppearanceReady=true
 local viewmodelSnapshots={}
 local function sameAppearance(a,b)
 	if typeof(a)=="Color3" and typeof(b)=="Color3" then
@@ -70,7 +70,8 @@ local function collectViewParts(model)
 	return parts
 end
 local function refreshViewmodel()
-	-- Live camera-mesh refresh detached the PF rig; do not repeat that path.
+	-- Only the restricted hand/equipped-item path is enabled. Native capability
+	-- checks still reject unsupported pieces and builds, including the 1.31.26 guard.
 	if not viewmodelAppearanceReady then restoreViewmodel();APP.stats.viewmodelParts=0;APP.stats.viewmodelError="Viewmodel customization is temporarily disabled after an animation regression";return end
 	if not CFG.armsEnabled and not CFG.sleevesEnabled and not CFG.weaponEnabled then restoreViewmodel();APP.stats.viewmodelParts=0;return end
 	local camera=read(workspace,"CurrentCamera")
@@ -94,13 +95,15 @@ local function refreshViewmodel()
 		local material=selected~="Original" and Enum.Material[selected] or nil
 		for _,part in ipairs(collectViewParts(model))do
 			local sleeve=prefix=="arms" and read(part,"Name")=="Sleeves"
-			if CFG[prefix.."Enabled"] or (sleeve and CFG.sleevesEnabled)then
+			-- SkinTone is the independently tested hand mesh. Leave the sleeve,
+			-- invisible Arm anchor and unidentified glove/accessory meshes alone.
+			local allowed=not sleeve and (prefix~="arms" or read(part,"Name")=="SkinTone")
+			if allowed and CFG[prefix.."Enabled"]then
 			active[part]=true
 			local parent=read(part,"Parent")
 			local record=viewmodelSnapshots[part]
 			if not record or record.parent~=parent then record={parent=parent};viewmodelSnapshots[part]=record end
-			local chosen=(sleeve and CFG.sleevesEnabled)and Color3.fromRGB(CFG.sleevesRed,CFG.sleevesGreen,CFG.sleevesBlue)or color
-			setViewProperty(part,record,"Color",chosen);setViewProperty(part,record,"Material",CFG[prefix.."Enabled"]and material or nil)
+			setViewProperty(part,record,"Color",color);setViewProperty(part,record,"Material",material)
 			end
 		end
 	end
@@ -158,7 +161,7 @@ function APP.stop()
 	print("[PF_VIEWMODEL_TEST] restored and unloaded.")
 end
 APP.connections[1]=game:GetService("UserInputService").InputBegan:Connect(function(event)if event.KeyCode.Name=="F4"then APP.stop()end end)
-print("[PF_VIEWMODEL_TEST] Full bright + pink ambient. Viewmodel color/material changes are unavailable. F4 restores and unloads.")
+print("[PF_VIEWMODEL_TEST] Full bright + pink ambient by default. Optional hand/equipped-item appearance uses native capabilities; sleeves excluded. F4 restores and unloads.")
 local lastReport=nil
 while running()do
 	local message=APP.stats.environmentError or APP.stats.viewmodelError

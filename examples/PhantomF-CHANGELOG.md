@@ -24,3 +24,10 @@ Requires Jael X 1.31.5. Health is shown only when available; body volumes and sk
 - Environment tab: Full bright and Custom ambient color, with independent RGB controls. The custom color takes precedence over white ambient when both are enabled. Disabling Full bright restores brightness/shadows while the tint remains enabled; disabling both restores the original lighting.
 - Viewmodel controls were prepared for arms, separate sleeves and the active equipped item, including material dropdowns. They are explicitly unavailable: the live renderer refresh detached the PF rig and Reset VM did not recover its visual. No working viewmodel customization is claimed. Native 1.31.26 rejects camera-model appearance writes as a regression safeguard.
 - `pf-viewmodel-test.lua` is now a Lighting-only test by default (Full bright + pink tint). Camera model mutations are blocked. F4 restores and unloads. Existing mesh textures are retained; TextureID/SurfaceAppearance removal is unavailable.
+
+### Restricted appearance follow-up
+
+- Re-enabled the capability-checked SkinTone/equipped-item path; excluded sleeves, arm anchors and unidentified hand accessories.
+- Removed sleeve controls; preserved old configuration keys without applying them.
+- Tested pink hand detail and cyan Neon weapon, followed by restoration, on Jael X 1.31.24. Native 1.31.26 still blocks camera appearance writes.
+- Kept all appearance toggles OFF by default and preserved independent full-bright/ambient controls.

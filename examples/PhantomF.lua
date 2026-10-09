@@ -42,8 +42,8 @@ local RS = game:GetService("RunService")
 local CFG = {
 	fullBright=false, environmentEnabled=false, environmentRed=255, environmentGreen=80, environmentBlue=180,
 	sleevesEnabled=false, sleevesRed=255, sleevesGreen=80, sleevesBlue=180,
-	armsEnabled=false, armsRed=255, armsGreen=80, armsBlue=180, armsMaterial="Original",
-	weaponEnabled=false, weaponRed=100, weaponGreen=180, weaponBlue=255, weaponMaterial="Original",
+	armsEnabled=false, armsRed=255, armsGreen=80, armsBlue=180, armsMaterial="Neon",
+	weaponEnabled=false, weaponRed=100, weaponGreen=180, weaponBlue=255, weaponMaterial="Neon",
 	esp = true, skeleton = false,
 	chamsStyle = "Silhouette", chamsOutline = true,
 	chamsOutlineColor = Color3.new(1, 1, 1), chamsOutlineOpacity = 1, chamsThickness = 1.5,
@@ -1042,7 +1042,7 @@ task.spawn(function()while running() do local ok,err=pcall(refreshRoster);if not
 --=========================== LOCAL VIEWMODEL ==========================--
 -- Camera children are used instead of obfuscated model names. Arm models have
 -- a direct BasePart named Arm; the current weapon is the unique other mesh model.
-local viewmodelAppearanceReady=false
+local viewmodelAppearanceReady=true
 local viewmodelSnapshots={}
 local function sameAppearance(a,b)
 	if typeof(a)=="Color3" and typeof(b)=="Color3" then
@@ -1094,7 +1094,8 @@ local function collectViewParts(model)
 	return parts
 end
 local function refreshViewmodel()
-	-- Live camera-mesh refresh detached the PF rig; do not repeat that path.
+	-- Only the restricted hand/equipped-item path is enabled. Native capability
+	-- checks still reject unsupported pieces and builds, including the 1.31.26 guard.
 	if not viewmodelAppearanceReady then restoreViewmodel();APP.stats.viewmodelParts=0;APP.stats.viewmodelError="Viewmodel customization is temporarily disabled after an animation regression";return end
 	if not CFG.armsEnabled and not CFG.sleevesEnabled and not CFG.weaponEnabled then restoreViewmodel();APP.stats.viewmodelParts=0;return end
 	local camera=read(workspace,"CurrentCamera")
@@ -1118,13 +1119,15 @@ local function refreshViewmodel()
 		local material=selected~="Original" and Enum.Material[selected] or nil
 		for _,part in ipairs(collectViewParts(model))do
 			local sleeve=prefix=="arms" and read(part,"Name")=="Sleeves"
-			if CFG[prefix.."Enabled"] or (sleeve and CFG.sleevesEnabled)then
+			-- SkinTone is the independently tested hand mesh. Leave the sleeve,
+			-- invisible Arm anchor and unidentified glove/accessory meshes alone.
+			local allowed=not sleeve and (prefix~="arms" or read(part,"Name")=="SkinTone")
+			if allowed and CFG[prefix.."Enabled"]then
 			active[part]=true
 			local parent=read(part,"Parent")
 			local record=viewmodelSnapshots[part]
 			if not record or record.parent~=parent then record={parent=parent};viewmodelSnapshots[part]=record end
-			local chosen=(sleeve and CFG.sleevesEnabled)and Color3.fromRGB(CFG.sleevesRed,CFG.sleevesGreen,CFG.sleevesBlue)or color
-			setViewProperty(part,record,"Color",chosen);setViewProperty(part,record,"Material",CFG[prefix.."Enabled"]and material or nil)
+			setViewProperty(part,record,"Color",color);setViewProperty(part,record,"Material",material)
 			end
 		end
 	end
@@ -1328,19 +1331,17 @@ local okUI,whyUI=pcall(function()
 	screen:AddLabel({text="Aim state",get=function()return "Aim: "..(APP.stats.aimReason or "Starting")end})
 	screen:AddLabel({text="Entities",get=function()return string.format("Enemies %d / allies %d / drawn %d",APP.stats.enemies or 0,APP.stats.allies or 0,APP.stats.drawn or 0)end})
 	screen:AddLabel({text="Last error",get=function()return APP.stats.lastError or "No errors" end})
-	local view=w:NewTab("Viewmodel","Unavailable pending animation-safe support")
-	for _,entry in ipairs({{"arms","Arms","left"},{"weapon","Equipped item","right"}})do
+	local view=w:NewTab("Viewmodel","Hands and equipped item; sleeves excluded")
+	for _,entry in ipairs({{"arms","Hands","left"},{"weapon","Equipped item","right"}})do
 		local prefix,title,side=entry[1],entry[2],entry[3]
 		local section=view:NewSection(title,side)
 		toggle(section,prefix.."Enabled","Customize "..title:lower())
 		for _,channel in ipairs({"Red","Green","Blue"})do slider(section,prefix..channel,channel,0,255,1)end
 		dropdown(section,prefix.."Material","Material",choices[prefix.."Material"])
-		section:AddParagraph({text="Client appearance only. Existing mesh textures remain; TextureID and SurfaceAppearance removal are unavailable in this external API. Unsupported renderer pieces are skipped."})
+		section:AddParagraph({text="Neon was tested with visible recoloring and restoration on Jael X 1.31.24. Color alone can remain cached. Existing mesh textures remain. Native capability checks still apply; 1.31.26 blocks camera appearance writes. Unsupported pieces are skipped."})
 	end
 	view:NewSection("Status","left"):AddLabel({text="Viewmodel state",get=function()return APP.stats.viewmodelError or ((APP.stats.viewmodelParts or 0).." tracked parts")end})
-	local sleeves=view:NewSection("Sleeves","left")
-	toggle(sleeves,"sleevesEnabled","Separate sleeve color")
-	for _,channel in ipairs({"Red","Green","Blue"})do slider(sleeves,"sleeves"..channel,channel,0,255,1)end
+	view:NewSection("Excluded parts","left"):AddParagraph({text="Sleeves, invisible arm anchors and unidentified hand accessories are excluded. Saved sleeve settings are retained for compatibility and do not activate writes."})
 	local environment=w:NewTab("Environment","Brightness and ambient tint")
 	local bright=environment:NewSection("Lighting","left")
 	toggle(bright,"fullBright","Full bright")
