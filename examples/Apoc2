@@ -1,7 +1,7 @@
 --[[
 	AR2_JOX — external Apocalypse Rising 2 information and ESP overlay.
 	Place: 863266079; additional AR2 maps accepted by the reference folder layout.
-	RightControl: menu. F6: ESP. F7: align map at cursor. End: unload.
+	Insert: menu. F6: ESP. F7: align map at cursor. End: unload.
 	JoX UI loads from TrollLexBR/Jael-X. Aim assist uses relative mouse input only when enabled and held.
 	LootGroup NumberValues describe spawn categories, not confirmed contents.
 ]]
@@ -820,7 +820,7 @@ local ok,lib=pcall(function()
 	local fn,err=loadstring(src,"@JoX-Library");assert(fn,err);return fn()
 end)
 if ok and type(lib)=="table"and lib.NewWindow then
-	APP.Library=lib;lib:SetToggleKey("RightControl")
+	APP.Library=lib;lib:SetToggleKey("Insert")
 	local w=lib:NewWindow({title="Apocalypse Rising 2",subtitle="JoX / external information overlay",configId="ar2-jox",width=940,height=730});APP.window=w
 	local combat=w:NewTab("Combat");local mapTab=w:NewTab("Map");local visuals=w:NewTab("ESP");local status=w:NewTab("Status");local utilities=w:NewTab("Utilities")
 	local function toggle(section,key,label)
@@ -915,7 +915,7 @@ if ok and type(lib)=="table"and lib.NewWindow then
 	for _,a in ipairs({{"hud","Status HUD"},{"combat","Combat warning"},{"panelZombies","Nearest zombies"},{"panelPlayers","Nearest characters"},{"panelVehicles","Nearest vehicles"}})do toggle(u,a[1],a[2])end
 	local d=utilities:NewSection("Runtime","right")
 	d:AddLabel({get=function()return string.format("ESP callback: %.2f ms | Read faults: %d",APP.poseMs,APP.faults)end})
-	d:AddParagraph({text="RightControl toggles the menu. F6 toggles ESP. End unloads. GUI-derived fields show Unavailable when the exact game profile cannot read them."})
+	d:AddParagraph({text="Insert toggles the menu. F6 toggles ESP. End unloads. GUI-derived fields show Unavailable when the exact game profile cannot read them."})
 	d:AddButton({text="Unload script",style="danger",callback=APP.stop})
 else warn("[AR2_JOX] JoX UI unavailable; core remains active: "..tostring(lib))end
 if APP.window then
@@ -929,7 +929,7 @@ if APP.mapOpen and APP.Library then APP.Library:SetVisible(false)end
 local due={membership=0,vehicle=0,info=0,rank=0,save=0,party=0}
 refreshParty()
 print("[AR2_JOX] "..APP.partyStatus)
-print("[AR2_JOX] Loaded; RightControl menu, F6 ESP, End unload")
+print("[AR2_JOX] Loaded; Insert menu, F6 ESP, End unload")
 while running()do
 	if not supported()then APP.stop();break end
 	local ok,err=pcall(function()

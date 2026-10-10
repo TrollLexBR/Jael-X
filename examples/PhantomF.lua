@@ -7,7 +7,7 @@
 	  F2       -> toggle aim
 	  F3       -> toggle chams
 	  F4       -> stop and unload
-	  RightCtrl -> show/hide the JoX menu
+	  Insert -> show/hide the JoX menu
 	  Handle: shared.PF_ASSIST (getgenv is unavailable in this VM).
 
 	Measured: Player.Character and Player.Team are nil. Character models live
@@ -19,7 +19,7 @@
 	approximate OBB visibility; unreadable/incomplete map scans block aim.
 	Camera.CFrame is read-only here: aim uses bounded relative mouse movement.
 	Requires Jael X 1.31.5 Entity List and raycast APIs. Menu starts closed.
-	Status reports distance/FOV/input blockers; RightCtrl opens settings.
+	Status reports distance/FOV/input blockers; Insert opens settings.
 	Name ESP reads ContentText: confirmed readable on Jael X 1.30 while Text
 	fails with "Unsupported string layout" for these PlayerTag labels.
 	Health follows visible PlayerTag.Health.Percent; hidden templates are not HP.
@@ -1371,14 +1371,14 @@ local okUI,whyUI=pcall(function()
 	performance:AddButton({text="Refresh players now",callback=function()local ok,err=pcall(refreshRoster);if not ok then report(err)else Library:Notify("Roster refreshed",#roster.." character models")end end})
 	performance:AddButton({text="Save current settings",callback=function()saveConfig();local ok,err=w:SaveConfig("Last session");assert(ok,err);Library:Notify("Saved","Current settings and JoX profile saved")end})
 	performance:AddButton({text="Unload everything",callback=APP.stop})
-	performance:AddParagraph({text="RightCtrl: menu. F2: aim. F3: chams. F4 or End: unload. Options autosave; Configs stores named profiles. Unload disconnects every signal and removes all Drawing objects."})
-	combat:Select();Library:SetVisible(false)
-	Library:Notify("PF JoX","RightCtrl opens settings. Hold your aim key with the menu closed.")
+	performance:AddParagraph({text="Insert: menu. F2: aim. F3: chams. F4 or End: unload. Options autosave; Configs stores named profiles. Unload disconnects every signal and removes all Drawing objects."})
+	combat:Select();Library:SetVisible(true)
+	Library:Notify("PF JoX","Insert opens settings. Hold your aim key with the menu closed.")
 end)
 if not okUI then
 	APP.menuOpen=false
 	if APP.Library then pcall(function()APP.Library:Unload()end);APP.Library=nil end
 	warn("[PF_ASSIST] JoX UI unavailable: "..tostring(whyUI)..". Core remains active; F2/F3/F4 work.")
 end
-print("[PF_ASSIST] JoX hub loaded. RightCtrl menu; F2 aim; F3 chams; F4/End unload.")
+print("[PF_ASSIST] JoX hub loaded. Insert menu; F2 aim; F3 chams; F4/End unload.")
 while running()do task.wait(.25)end

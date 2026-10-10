@@ -6,7 +6,7 @@
 	  F1           -> toggle all automation
 	  F3           -> dump fishing GUI objects
 	  F4           -> STOP EVERYTHING and unload
-	  RightControl -> show/hide the Jael windows
+	  Insert -> show/hide the Jael windows
 	  Console: shared.FISCH_JAELX.stop()
 
 	Port of RbxCli/Games/Fisch/fisch-auto.lua. Runtime: Jael X Lua 5.4.
@@ -1245,7 +1245,7 @@ local okUI, uiError = pcall(function()
 	debug:AddButton({text = "Refresh GUI cache", callback = function()guiCache.dirty = true;nextReelLookupAt = 0 end})
 	debug:AddButton({text = "Print diagnostics", callback = function()log(HttpService:JSONEncode(APP.getDiagnostics()))end})
 	fishing:Select()
-	Library:Notify("Fisch / Jael X", "Ready. F1 starts; F4 unloads. RightControl toggles the menu.", 5)
+	Library:Notify("Fisch / Jael X", "Ready. F1 starts; F4 unloads. Insert toggles the menu.", 5)
 end)
 if not okUI then
 	if Library then pcall(function()Library:Unload()end);Library = nil end
@@ -1381,5 +1381,5 @@ function APP.stop()
 end
 
 log("loaded. Keyboard backend: input.key_down/input.key_up")
-log("F1 toggles automation, RightControl toggles UI, and F4 unloads.")
+log("F1 toggles automation, Insert toggles UI, and F4 unloads.")
 while running() do task.wait(0.25) end

@@ -1,6 +1,6 @@
 --[[
 	JoX Library — component gallery (no gameplay changes).
-	RightControl: show/hide. End: unload this demo and its library.
+	Insert: show/hide. End: unload this demo and its library.
 	Loads the published JoX Library from GitHub.
 ]]
 if shared.JaelUIDemo and shared.JaelUIDemo.stop then pcall(shared.JaelUIDemo.stop) end
@@ -61,6 +61,6 @@ APP.connections[#APP.connections+1]=game:GetService("UserInputService").InputBeg
 	if e.KeyCode==Enum.KeyCode.End then APP.stop() end
 end)
 combat:Select()
-Library:Notify("JoX Library","RightCtrl toggles the menu. Configs is always the last tab.")
-print("[JAEL_UI_DEMO] loaded. RightCtrl toggles, End unloads.")
+Library:Notify("JoX Library","Insert toggles the menu. Configs is always the last tab.")
+print("[JAEL_UI_DEMO] loaded. Insert toggles, End unloads.")
 while APP.alive and shared.JaelUIDemo==APP do task.wait(.25) end

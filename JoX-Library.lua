@@ -1,7 +1,7 @@
 --[[
 	JoX Library — standalone interface library for Jael X (Lua 5.4).
 	External Drawing primitives only; no Roblox instances or gameplay writes.
-	RightControl toggles all windows. Call Library:Unload() to disconnect signals.
+	Insert toggles all windows. Call Library:Unload() to disconnect signals.
 	See README.md and demo.lua for the public API and packaging instructions.
 ]]
 local RS = game:GetService("RunService")
@@ -10,7 +10,7 @@ local HTTP = game:GetService("HttpService")
 assert(immediate and immediate.push_clip and font, "JoX Library requires Jael X with clipping support")
 local previous=shared.JoXLibrary or shared.JaelDrawingUI
 if previous and previous.Unload then pcall(function() previous:Unload() end) end
-local Library = { Version = "1.1.5", Windows = {}, Connections = {}, Alive = true, Visible = true, ToggleKey = "RightControl",
+local Library = { Version = "1.1.6", Windows = {}, Connections = {}, Alive = true, Visible = true, ToggleKey = "Insert",
 	Rounding = 2, Notifications = true, NotificationDuration = 4, NotificationPosition = "Bottom right" }
 shared.JaelDrawingUI = Library
 shared.JoXLibrary = Library
@@ -267,6 +267,7 @@ function Library:NewWindow(opts)
 			local flag=self.aliases[old] or old;local c=self.flags[flag]
 			if c then
 				local value=entry;if type(entry)=="table" and entry.value~=nil then value=entry.value end
+				if flag=="_uiMenuKey" and value=="RightControl" then value="Insert" end
 				local ok,result=pcall(normalize,c,value)
 				if ok then accepted[#accepted+1]={c=c,v=result,mode=type(entry)=="table" and entry.mode}
 				else rejected[#rejected+1]=flag end

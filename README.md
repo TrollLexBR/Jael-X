@@ -8,6 +8,8 @@ A reusable Lua 5.4 interface library for Jael X. It uses the app's native extern
 
 ## Files and loading
 
+Game menus open on every launch. Insert is the default show/hide shortcut; legacy RightControl defaults migrate to Insert while custom bindings remain configurable. DIAZ AP also migrates its former F7 menu default and stays published as protected Jael X Lua.
+
 - `JoX-Library.lua`: standalone library, returns `Library`.
 - `examples/demo.lua`: component gallery loaded from GitHub; never changes gameplay.
 
@@ -81,7 +83,7 @@ enabled:SetValue(false, true) -- Silent update.
 | `tab:Select()` | Select a page and clear transient input. |
 | `section:SetCollapsed(bool)` / `:SetVisible(bool)` | Control section layout. |
 | `window:SetVisible(bool)` / `:Toggle()` / `:Remove()` | Hide, show, or remove a window. |
-| `Library:SetVisible(bool)` / `:SetToggleKey(key)` | Global visibility and menu hotkey. Default: RightControl. |
+| `Library:SetVisible(bool)` / `:SetToggleKey(key)` | Global visibility and menu hotkey. Default: Insert. |
 | `Library:IsInteracting()` / `:IsMouseOverUI()` | Pause your own input features while users interact with the menu. |
 | `Library:Unload()` | Disconnect every owned signal and clear windows/popups. Re-loading unloads the previous library. |
 
