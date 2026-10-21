@@ -1,6 +1,6 @@
 --[[
 	PF_ASSIST — JoX aim and ESP hub for Phantom Forces.
-	Place: Phantom Forces (292439477). Runtime: Jael X, Lua 5.4.
+	Place: Phantom Forces (292439477). Runtime: Prism, Luau.
 
 	KEYS
 	  Hold RMB -> aim at the closest enemy head inside the FOV
@@ -10,36 +10,44 @@
 	  Insert -> show/hide the JoX menu
 	  Handle: shared.PF_ASSIST (getgenv is unavailable in this VM).
 
-	Measured: Player.Character and Player.Team are nil. Character models live
-	under workspace.Players in randomized team folders. A BillboardGui marks
-	the head; its TextLabel.TextColor3 is red (255,10,20) for enemies and cyan
-	for allies. Never assume folder order or randomized object names.
-	The six direct body parts report Size=0.001; drawing uses R6-sized volumes.
-	These external volumes approximate R6 bodies. Map-only raycast checks are
-	approximate OBB visibility; unreadable/incomplete map scans block aim.
-	Camera.CFrame is read-only here: aim uses bounded relative mouse movement.
-	Requires Jael X 1.31.5 Entity List and raycast APIs. Menu starts closed.
-	Status reports distance/FOV/input blockers; Insert opens settings.
-	Name ESP reads ContentText: confirmed readable on Jael X 1.30 while Text
-	fails with "Unsupported string layout" for these PlayerTag labels.
-	Health follows visible PlayerTag.Health.Percent; hidden templates are not HP.
-	Unknown health is omitted; no hidden template is presented as real HP.
-	ESP uses one Entity List and one fresh native pose batch per render frame.
-	Skeleton links measured head/torso/limb centers, not hidden engine joints.
+	Teams use the current scoreboard membership and the local username.
+	Player.Character/Team can be nil; random folder names never determine teams.
+	Tag colors are a fallback only when the scoreboard is unavailable.
+	Unknown or conflicting team evidence cannot authorize aim.
+	Viewmodel and environment changes require native CanWriteProperty support.
+	Unsupported controls report the real capability error without stopping ESP.
+	Map visibility is approximate; unknown or stale geometry blocks aim.
 ]]
 
 --=========================== LIFECYCLE ==========================--
+local SCRIPT_VERSION = "1.1.2"
 local ENV = shared
 if ENV.PF_ASSIST and ENV.PF_ASSIST.stop then
 	pcall(ENV.PF_ASSIST.stop)
 	task.wait(0.15)
 end
-local APP = { alive = true, stats = {}, connections = {}, visuals = {} }
+local APP = { version = SCRIPT_VERSION, alive = true, stats = {}, connections = {}, visuals = {} }
 ENV.PF_ASSIST = APP
+local input = input
+local nativeInput = input
+local function uiLibrarySource(source)
+	return [==[
+local nativeInput=input
+local uiInput=setmetatable({is_focused=function()
+	local ok,focused=pcall(nativeInput.is_focused)
+	if ok and focused then return true end
+	local valid,status=pcall(nativeInput.get_status)
+	return valid and type(status)=="table" and status.textCaptureActive==true and status.textFocusDenied~=true
+end},{__index=nativeInput})
+input=uiInput
+if shared.PF_ASSIST then shared.PF_ASSIST.uiInput=uiInput end
+]==]..source
+end
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local RS = game:GetService("RunService")
 local CFG = {
+	menuKey="Insert", menuAccent=Color3.fromRGB(160,110,255),
 	fullBright=false, environmentEnabled=false, environmentRed=255, environmentGreen=80, environmentBlue=180,
 	sleevesEnabled=false, sleevesRed=255, sleevesGreen=80, sleevesBlue=180,
 	armsEnabled=false, armsRed=255, armsGreen=80, armsBlue=180, armsMaterial="Neon",
@@ -114,6 +122,11 @@ local function normalizeSetting(key, value)
 		for _, item in ipairs(choices[key]) do if value==item then return value end end
 		error("Unknown option: " .. tostring(value))
 	end
+	if key=="menuKey" then
+		assert(type(value)=="string" and value~="None" and value~="Unknown" and Enum.KeyCode[value],"Select a keyboard key for the menu")
+		assert(value~="F2" and value~="F3" and value~="F4" and value~="F6" and value~="End","This key is reserved by the script")
+		return value
+	end
 	if key=="aimKey" then
 		assert(type(value)=="string" and (value=="None" or value:match("^MB[123]$") or Enum.KeyCode[value]), "Invalid key")
 		return value
@@ -134,7 +147,7 @@ APP.menuOpen = false
 local HTTP = game:GetService("HttpService")
 local configFile = "pf_jox_config.json"
 local function saveConfig()
-	pcall(function()
+	local ok,err=pcall(function()
 		local values = {}
 		for k, v in pairs(CFG) do
 			if type(v) == "number" or type(v) == "boolean" or type(v) == "string" then values[k] = v
@@ -142,6 +155,8 @@ local function saveConfig()
 		end
 		fs.write_async(configFile, HTTP:JSONEncode(values))
 	end)
+	APP.stats.settingsError=not ok and tostring(err)or nil
+	return ok,err
 end
 pcall(function()
 	local ok,raw=pcall(function()return buffer.tostring(fs.read_async(configFile))end)
@@ -284,41 +299,90 @@ local function locateCharacters()
 		end
 	end
 end
+--=========================== VERIFIED SCOREBOARD TEAMS ==========================--
+local teamMembership, localTeam = {}, nil
+local function child(object,name)
+	local ok,value=pcall(function()return object and object:FindFirstChild(name)end)
+	return ok and value or nil
+end
+local function username(value)
+	if type(value)~="string" then return nil end
+	value=value:gsub("<.->",""):match("^%s*(.-)%s*$")
+	return value~="" and value:lower() or nil
+end
+local function refreshTeams()
+	-- Read only the populated scoreboard. Templates can contain plausible sample names.
+	local membership,conflicts={},{}
+	local player=read(Players,"LocalPlayer")
+	local container=child(child(child(child(player,"PlayerGui"),"LeaderboardScreenGui"),"DisplayScoreFrame"),"Container")
+	for _,board in ipairs(children(container))do
+		local name=read(board,"Name")
+		local team=name=="DisplayPhantomBoard" and "Phantoms" or name=="DisplayGhostBoard" and "Ghosts" or nil
+		if team then
+			for _,row in ipairs(children(child(board,"Container")))do
+				local label=child(row,"TextPlayer");local key=label and username(readPlayerName(label))
+				if key then if membership[key] and membership[key]~=team then conflicts[key]=true else membership[key]=team end end
+			end
+		end
+	end
+	for key in pairs(conflicts)do membership[key]=nil end
+	teamMembership=membership
+	localTeam=membership[username(read(player,"Name"))]
+	APP.stats.teamSource=localTeam and "Current scoreboard" or "Scoreboard awaiting local player"
+	APP.stats.localTeam=localTeam or "Unknown"
+	APP.stats.teamConflicts=0;for _ in pairs(conflicts)do APP.stats.teamConflicts=APP.stats.teamConflicts+1 end
+end
+
 local attachEntity
 local function refreshRoster()
+	refreshTeams()
 	local folder = locateCharacters()
 	local nextRoster, seen = {}, {}
+	local discoveryStarted=os.clock()
+	local liveRoster={};local liveSeen={}
+	for _,e in ipairs(roster)do liveRoster[#liveRoster+1]=e;liveSeen[e.model]=true end
+	roster=liveRoster
 	for _, team in ipairs(children(folder)) do
 		for _, model in ipairs(children(team)) do
 			if model:IsA("Model") then
 				local key = model
 				local old = APP.visuals[key]
 				local ok, e = pcall(function()
-					return old and read(old.entity.label,"Parent") and old.entity or resolve(model)
+					local cached=old and old.entity
+					return cached and not cached.needsResolve and os.clock()-(cached.resolvedAt or 0)<2 and read(cached.label,"Parent") and cached or resolve(model)
 				end)
 				if ok and e then
 					e.key = key
+					e.resolvedAt=e.resolvedAt or os.clock();e.needsResolve=nil
 					e.name = readPlayerName(e.label) or e.name
 					refreshHealth(e)
 					if attachEntity then attachEntity(e) end
 					seen[key] = true
 					nextRoster[#nextRoster + 1] = e
+					if not liveSeen[key]then liveSeen[key]=true;liveRoster[#liveRoster+1]=e end
 				end
 			end
+			if os.clock()-discoveryStarted>=.004 then task.wait(.001);if not running()then return end;discoveryStarted=os.clock()end
 		end
 	end
 	for key, v in pairs(APP.visuals) do
 		if not seen[key] then removeVisual(v); APP.visuals[key] = nil end
 	end
-	roster = nextRoster
+	roster = nextRoster;APP.stats.rosterModels=#roster
 end
 local function classify(e)
-	local c = read(e.label, "TextColor3")
+	local key=username(e.name)
+	local team=key and teamMembership[key]
+	if localTeam then
+		-- Missing or duplicate membership remains unknown; never guess from folder order.
+		if not team then return nil end
+		e.teamSource="Scoreboard";return team~=localTeam
+	end
+	local c=read(e.label,"TextColor3")
 	if not c then return nil end
-	if math.abs(c.R * 255 - 255) <= 8 and math.abs(c.G * 255 - 10) <= 12
-		and math.abs(c.B * 255 - 20) <= 12 then return true end
-	-- Recognize the measured cyan and green squad labels; unknown colors are skipped.
-	if c.G > 0.7 and c.R < 0.35 then return false end
+	e.teamSource="Tag color fallback"
+	if math.abs(c.R*255-255)<=8 and math.abs(c.G*255-10)<=12 and math.abs(c.B*255-20)<=12 then return true end
+	if c.G>.7 and c.R<.35 then return false end
 	return nil
 end
 local function alive(e, hp)
@@ -385,7 +449,7 @@ local function prepareRayCache(root,force)
 		buildSpatialCache(root,nodes,false);return
 	end
 	for index,part in ipairs(nodes)do
-		if index%64==0 then collectgarbage("step",128);task.wait(.001);if not running()then error("Stopped")end end
+		if index%64==0 then task.wait(.001);if not running()then error("Stopped")end end
 		if part:IsA("BasePart")then
 			local size,cf=read(part,"Size"),read(part,"CFrame")
 			if size and cf and size.X>0 and size.Y>0 and size.Z>0
@@ -436,7 +500,7 @@ buildSpatialCache=function(root,nodes,recursive)
 				index=index+1;local part=queue[index];queue[index]=nil
 				if not running()or spatialCache~=cache then return end
 				if index%32==0 then
-					collectgarbage("step",256)
+					-- Prism exposes count/collect; the runtime owns incremental GC.
 					task.wait(.002)
 				end
 				if part:IsA("BasePart")then
@@ -850,8 +914,12 @@ local function refreshPoses()
 		local pose=snapshot.parts[i]
 		if pose and typeof(pose.cframe)=="CFrame" then
 			local e,index=owner[1],owner[2]
+			e.poseFailureAt=nil
 			local part={Name=e.partNames[index],CFrame=pose.cframe,Size=e.sizes[e.parts[index]]}
 			e.poses[#e.poses+1]=part;e.poseNames[part.Name]=part
+		else
+			local e=owner[1];e.poseFailureAt=e.poseFailureAt or os.clock()
+			if os.clock()-e.poseFailureAt>.35 then e.needsResolve=true end
 		end
 	end
 	if CFG.fastInfoESP and not CFG.chams and not CFG.skeleton then
@@ -995,26 +1063,28 @@ local function frame(dt)
 	APP.stats.aimReason,APP.stats.frames,APP.stats.drawn=reason,(APP.stats.frames or 0)+1,#states
 	if now-lastStatus>=.15 then
 		lastStatus=now
-		local text=string.format("PF JoX | %s | Enemies %d | Drawn %d | %s",reason,APP.stats.enemies,#states,APP.stats.target or "No target")
+		local text=string.format("Prism PF | %s | Enemies %d | Drawn %d | %s",reason,APP.stats.enemies,#states,APP.stats.target or "No target")
 		if status.Text~=text then status.Text=text end
 	end
 	status.Visible=CFG.showStatus
 	finishDrawings()
 	APP.stats.adapterMs=(os.clock()-now)*1000
+	APP.stats.maxAdapterMs=math.max(APP.stats.maxAdapterMs or 0,APP.stats.adapterMs)
 end
 --=========================== CORE START ==========================--
 if read(game,"PlaceId")~=292439477 then warn("[PF_ASSIST] This adapter requires Phantom Forces (292439477).");APP.stop();return end
 if type(entities)~="table" or type(entities.new)~="function" or type(entities.get_parts_snapshot)~="function" then
-	warn("[PF_ASSIST] Requires Jael X 1.31.5 Entity List. Update the app first.");APP.stop();return
+	warn("[PF_ASSIST] Requires Prism 1.31.5 Entity List. Update the app first.");APP.stop();return
 end
 ring=Drawing.new("Circle");ring.NumSides=64;ring.Thickness=1
 status=Drawing.new("Text");status.Position=Vector2.new(20,12);status.Size=14;status.Color=Color3.fromRGB(235,235,245);status.Outline=true
 APP.connections[#APP.connections+1]=UIS.InputBegan:Connect(function(event)
 	if not running() then return end
 	local key=event.KeyCode.Name
-	if key=="F4" or key=="End" then APP.stop()
-	elseif key=="F2" then CFG.aim=not CFG.aim;if APP.aimControl then APP.aimControl:Set(CFG.aim,true) end
-	elseif key=="F3" then CFG.chams=not CFG.chams;APP.styleRevision=APP.styleRevision+1;if APP.chamsControl then APP.chamsControl:Set(CFG.chams,true) end end
+	if key=="F6" and APP.diagnostics then APP.diagnostics()
+	elseif key=="F4" or key=="End" then APP.stop()
+	elseif key=="F2" then CFG.aim=not CFG.aim;if APP.aimControl then APP.aimControl:SetValue(CFG.aim,true) end
+	elseif key=="F3" then CFG.chams=not CFG.chams;APP.styleRevision=APP.styleRevision+1;if APP.chamsControl then APP.chamsControl:SetValue(CFG.chams,true) end end
 end)
 APP.connections[#APP.connections+1]=RS.PreRender:Connect(function(dt)if running() then local ok,err=pcall(frame,dt);if not ok then hideAll();report(err) end end end)
 -- Register after the adapter callback: descriptor poses/styles belong to the current render frame.
@@ -1038,11 +1108,11 @@ end})
 		task.wait(CFG.lightweight and .016 or .01)
 	end
  end)
-task.spawn(function()while running() do local ok,err=pcall(refreshRoster);if not ok then roster={};report(err) end;task.wait(CFG.rosterRate) end end)
+task.spawn(function()while running() do local started=os.clock();local ok,err=pcall(refreshRoster);APP.stats.rosterReadMs=(os.clock()-started)*1000;if not ok then report(err) end;task.wait(CFG.rosterRate) end end)
 --=========================== LOCAL VIEWMODEL ==========================--
 -- Camera children are used instead of obfuscated model names. Arm models have
 -- a direct BasePart named Arm; the current weapon is the unique other mesh model.
-local viewmodelAppearanceReady=true
+local viewmodelAppearanceReady=false
 local viewmodelSnapshots={}
 local function sameAppearance(a,b)
 	if typeof(a)=="Color3" and typeof(b)=="Color3" then
@@ -1066,19 +1136,21 @@ restoreViewmodel=function()
 	viewmodelSnapshots={}
 end
 local function setViewProperty(part,record,key,value)
-	if value==nil then restoreViewProperty(part,record,key);return end
+	if value==nil then restoreViewProperty(part,record,key);return true end
 	local state=record[key]
-	if state and sameAppearance(state.desired,value) then return end
-	if record.retry and os.clock()<record.retry then return end
+	if state and sameAppearance(state.desired,value) and sameAppearance(read(part,key),value) then return true end
+	record.retries=record.retries or {};record.errors=record.errors or {}
+	if record.retries[key] and os.clock()<record.retries[key] then APP.stats[record.errorScope or "viewmodelError"]=record.errors[key];return false end
 	local current=read(part,key)
-	if current==nil then return end
 	local ok,err=pcall(function()
-		assert(part:CanWriteProperty(key),"Current renderer does not support "..key)
+		assert(current~=nil,"Current value is unavailable for "..key)
+		-- The setter performs native validation; avoid a duplicate synchronous preflight.
 		part[key]=value
 	end)
-	if not ok then record.retry=os.clock()+2;APP.stats[record.errorScope or "viewmodelError"]=tostring(err);return end
-	state=state or {original=current}
-	state.desired=value;state.last=value;record[key]=state
+	if not ok then record.retries[key]=os.clock()+2;record.errors[key]=tostring(err);APP.stats[record.errorScope or "viewmodelError"]=record.errors[key];return false end
+	record.retries[key]=nil;record.errors[key]=nil
+	state=state or {original=current};state.desired=value;state.last=value;record[key]=state
+	return true
 end
 local function collectViewParts(model)
 	local parts,stack,visited={},{{model,0}},0
@@ -1096,7 +1168,7 @@ end
 local function refreshViewmodel()
 	-- Only the restricted hand/equipped-item path is enabled. Native capability
 	-- checks still reject unsupported pieces and builds, including unsupported camera models.
-	if not viewmodelAppearanceReady then restoreViewmodel();APP.stats.viewmodelParts=0;APP.stats.viewmodelError="Viewmodel customization is temporarily disabled after an animation regression";return end
+	if not viewmodelAppearanceReady then APP.stats.viewmodelParts=0;APP.stats.viewmodelError="Viewmodel writes paused: renderer animation regression under investigation";return end
 	if not CFG.armsEnabled and not CFG.sleevesEnabled and not CFG.weaponEnabled then restoreViewmodel();APP.stats.viewmodelParts=0;return end
 	local camera=read(workspace,"CurrentCamera")
 	local arms,weapons={},{}
@@ -1153,47 +1225,63 @@ restoreEnvironment=function()
 	environmentOwner,environmentRecord=nil,nil
 end
 local function refreshEnvironment()
-	if not CFG.fullBright and not CFG.environmentEnabled then restoreEnvironment();return end
+	if not CFG.fullBright and not CFG.environmentEnabled then restoreEnvironment();APP.stats.environmentApplied=0;return end
 	local lighting=game:GetService("Lighting")
 	if lighting~=environmentOwner then restoreEnvironment();environmentOwner=lighting;environmentRecord={parent=read(lighting,"Parent"),errorScope="environmentError"}end
-	APP.stats.environmentError=nil
-	-- Custom tint takes precedence over the white full-bright ambient.
+	APP.stats.environmentError=nil;APP.stats.environmentApplied=0
+	local skipped={}
 	local tint=CFG.environmentEnabled and Color3.fromRGB(CFG.environmentRed,CFG.environmentGreen,CFG.environmentBlue)or Color3.new(1,1,1)
-	setViewProperty(lighting,environmentRecord,"Ambient",tint)
-	setViewProperty(lighting,environmentRecord,"OutdoorAmbient",tint)
-	setViewProperty(lighting,environmentRecord,"Brightness",CFG.fullBright and 3 or nil)
 	local shadows=nil;if CFG.fullBright then shadows=false end
-	setViewProperty(lighting,environmentRecord,"GlobalShadows",shadows)
+	local desired={Ambient=tint,OutdoorAmbient=tint,Brightness=CFG.fullBright and 3 or false,GlobalShadows=shadows}
+	for _,key in ipairs(environmentKeys)do
+		local value=desired[key];if key=="Brightness" and value==false then value=nil end
+		environmentRecord.capabilities=environmentRecord.capabilities or {}
+		local capability=environmentRecord.capabilities[key]
+		if not capability or os.clock()-capability.checkedAt>=5 then
+			local ok,supported=pcall(function()return lighting:CanWriteProperty(key)end)
+			capability={checkedAt=os.clock(),allowed=ok and supported==true};environmentRecord.capabilities[key]=capability
+		end
+		if capability.allowed then if setViewProperty(lighting,environmentRecord,key,value) and value~=nil then APP.stats.environmentApplied=APP.stats.environmentApplied+1 end
+		elseif value~=nil then skipped[#skipped+1]=key end
+		task.wait();if not running()then return end
+	end
+	APP.stats.environmentUnavailable=#skipped>0 and table.concat(skipped,", ")or nil
 end
 APP.refreshEnvironment=refreshEnvironment
 APP.restoreEnvironment=restoreEnvironment
  task.spawn(function()
-	while running()do local ok,err=pcall(refreshEnvironment);if not ok then APP.stats.environmentError=tostring(err)end;task.wait(.5)end
+	while running()do local ok,err=pcall(refreshEnvironment);if not ok then APP.stats.environmentError=tostring(err)end;task.wait(.1)end
  end)
+APP.stats.viewmodelParts=0
+APP.stats.viewmodelError="Viewmodel controls temporarily hidden"
+--[=[ Temporarily disabled with the hidden viewmodel menu.
 APP.refreshViewmodel=refreshViewmodel
 APP.restoreViewmodel=restoreViewmodel
  task.spawn(function()
 	while running()do local ok,err=pcall(refreshViewmodel);if not ok then APP.stats.viewmodelError=tostring(err)end;task.wait(.5)end
  end)
 
---=========================== JOX INTERFACE ==========================--
+]=]
+
+--=========================== PRISM INTERFACE ==========================--
 local okUI,whyUI=pcall(function()
 	local ok,Library=pcall(function()
-		local localOK,fn=pcall(loadfile,"scripts/JoX-Library.lua")
-		if localOK and fn then return fn() end
-		local source=game:HttpGet("https://raw.githubusercontent.com/TrollLexBR/Jael-X/main/JoX-Library.lua")
-		local compiled,err=loadstring(source,"@JoX-Library.lua");assert(compiled,err);return compiled()
+		local source=game:HttpGet("https://raw.githubusercontent.com/TrollLexBR/Jael-X/refs/heads/main/examples/DrawingLibPrism")
+		local compiled,err=loadstring(uiLibrarySource(source),"@DrawingLibPrism");assert(compiled,err);return compiled()
 	end)
 	assert(ok and type(Library)=="table",tostring(Library))
-	APP.Library=Library
-	local w=Library:NewWindow({title="Phantom Forces",subtitle="JOX / ENTITY LIST ESP",configId="PFJoX",width=900,height=640,
+	APP.Library=Library;Library.Version=SCRIPT_VERSION;Library:SetToggleKey(CFG.menuKey);Library:SetTheme({accent=CFG.menuAccent})
+	local w=Library:NewWindow({title="Prism Phantom Forces",subtitle="PHANTOM FORCES",configId="PFJoX",width=760,height=610,
 		configAliases={["pf/thickness"]="pf/chamsThickness"}})
 	APP.window=w;APP.controls={}
 	local function changed(key,value)
 		CFG[key]=normalizeSetting(key,value);APP.styleRevision=APP.styleRevision+1
+		if key=="menuKey"then Library:SetToggleKey(CFG.menuKey)end
+		if key=="menuAccent"then Library:SetTheme({accent=CFG.menuAccent})end
 		if key=="adaptiveParts" or key=="surfacePoints" then visibilityEntries={} end
 		saveConfig()
 	end
+	APP.setSetting=changed
 	local function color(section,key,title)
 		local handle=section:AddColorPicker({text=title,flag="pf/"..key,default=CFG[key],callback=function(value)changed(key,value)end})
 		APP.controls[key]=handle;return handle
@@ -1228,7 +1316,7 @@ local okUI,whyUI=pcall(function()
 	slider(behavior,"fov","FOV radius (pixels)",40,400,1)
 	toggle(behavior,"showFov","Show FOV")
 	toggle(behavior,"targetLine","Line to selected target")
-	behavior:AddParagraph({text="Close the menu before aiming. The selected Roblox window must be focused and Mouse & keyboard enabled. Jael X 1.30 preserves fractional mouse movements."})
+	behavior:AddParagraph({text="Close the menu before aiming. The selected Roblox window must be focused and Mouse & keyboard enabled. Prism 1.30 preserves fractional mouse movements."})
 	local visuals=w:NewTab("ESP","Entity membership, range and visibility")
 	local players=visuals:NewSection("Entity List","left")
 	toggle(players,"esp","Enable ESP")
@@ -1244,21 +1332,21 @@ local okUI,whyUI=pcall(function()
 	toggle(overview,"nameDistance","Distance labels")
 	toggle(overview,"healthBars","Health bars")
 	toggle(overview,"tracers","Player tracers")
-	local chams=w:NewTab("Chams","Silhouette, wireframe and volume styles")
-	local fill=chams:NewSection("Fill","left")
+	local chams=w:NewTab("ESP style","Chams, boxes, skeleton and tracer styling")
+	local fill=chams:NewSection("Fill","full")
 	dropdown(fill,"chamsStyle","Chams style",{"Silhouette","Wireframe","Volumes"})
 	toggle(fill,"filledChams","Filled chams")
 	slider(fill,"opacity","Chams opacity",0,1,.01)
 	toggle(fill,"chamsUseEntityColor","Use team / visibility color")
 	color(fill,"chamsColor","Custom fill color")
 	fill:AddParagraph({text="Silhouette unions all visible body volumes and applies opacity once. Wireframe draws part edges; Volumes preserves individual faces. Bodies remain approximations of R6 anatomy."})
-	local outline=chams:NewSection("Outline / wire","right")
+	local outline=chams:NewSection("Outline / wire","full")
 	toggle(outline,"chamsOutline","Show outline / wire")
 	color(outline,"chamsOutlineColor","Outline / wire color")
 	slider(outline,"chamsOutlineOpacity","Outline / wire opacity",0,1,.01)
 	slider(outline,"chamsThickness","Outline / wire thickness",.1,8,.1)
-	local boxes=w:NewTab("Boxes","Full, corner, dashed and 3D boxes")
-	local boxLines=boxes:NewSection("Lines","left")
+	local boxes=chams
+	local boxLines=boxes:NewSection("Lines","full")
 	dropdown(boxLines,"boxStyle","Box style",{"Corners","Full box","Dashed","3D"})
 	toggle(boxLines,"boxUseEntityColor","Use team / visibility color")
 	color(boxLines,"boxColor","Custom line color")
@@ -1267,7 +1355,7 @@ local okUI,whyUI=pcall(function()
 	slider(boxLines,"boxCornerLength","Corner fraction",.05,.5,.01)
 	slider(boxLines,"boxDashLength","Dash length",1,40,1)
 	slider(boxLines,"boxGapLength","Dash gap",1,40,1)
-	local boxBorder=boxes:NewSection("Border & fill","right")
+	local boxBorder=boxes:NewSection("Border & fill","full")
 	toggle(boxBorder,"boxBorder","Show border")
 	color(boxBorder,"boxBorderColor","Border color")
 	slider(boxBorder,"boxBorderOpacity","Border opacity",0,1,.01)
@@ -1275,20 +1363,20 @@ local okUI,whyUI=pcall(function()
 	toggle(boxBorder,"boxFilled","Filled box")
 	color(boxBorder,"boxFillColor","Fill color")
 	slider(boxBorder,"boxFillOpacity","Fill opacity",0,1,.01)
-	local skeleton=w:NewTab("Skeleton","Head, torso and limb-center links")
-	local bones=skeleton:NewSection("Links","left")
+	local skeleton=chams
+	local bones=skeleton:NewSection("Links","full")
 	toggle(bones,"skeletonUseEntityColor","Use team / visibility color")
 	color(bones,"skeletonColor","Custom skeleton color")
 	slider(bones,"skeletonOpacity","Skeleton opacity",0,1,.01)
 	slider(bones,"skeletonThickness","Skeleton thickness",.1,8,.1)
 	bones:AddParagraph({text="The PF adapter links the tagged head and discovered torso to other body-part centers. Missing poses skip their links. This is an approximate stick figure, not engine joint extraction."})
-	local boneBorder=skeleton:NewSection("Border","right")
+	local boneBorder=skeleton:NewSection("Border","full")
 	toggle(boneBorder,"skeletonBorder","Show border")
 	color(boneBorder,"skeletonBorderColor","Border color")
 	slider(boneBorder,"skeletonBorderOpacity","Border opacity",0,1,.01)
 	slider(boneBorder,"skeletonBorderThickness","Border thickness",.1,8,.1)
-	local labels=w:NewTab("Labels & health","Names, distance and available health")
-	local names=labels:NewSection("Text","left")
+	local labels=chams
+	local names=labels:NewSection("Text","full")
 	toggle(names,"nameUseEntityColor","Use team / visibility color")
 	color(names,"nameColor","Custom text color")
 	slider(names,"nameOpacity","Text opacity",0,1,.01)
@@ -1296,7 +1384,7 @@ local okUI,whyUI=pcall(function()
 	dropdown(names,"nameFont","Font",{"Segoe UI","Arial","Consolas","Tahoma"})
 	toggle(names,"nameOutline","Text outline")
 	slider(names,"nameOffset","Text offset",0,30,1)
-	local bars=labels:NewSection("Health","right")
+	local bars=labels:NewSection("Health","full")
 	dropdown(bars,"healthSide","Bar side",{"Left","Right","Bottom"})
 	color(bars,"healthColor","Health color")
 	slider(bars,"healthOpacity","Health opacity",0,1,.01)
@@ -1306,15 +1394,15 @@ local okUI,whyUI=pcall(function()
 	slider(bars,"healthOffset","Bar offset",0,30,1)
 	toggle(bars,"healthText","Health percentage")
 	bars:AddParagraph({text="Health reads a usable visible game nametag percentage, not server HP. Hidden, missing or invalid health is omitted. Lowest health excludes unknown values."})
-	local tracers=w:NewTab("Tracers","Origins, destinations and line styling")
-	local tracerLines=tracers:NewSection("Lines","left")
+	local tracers=chams
+	local tracerLines=tracers:NewSection("Lines","full")
 	dropdown(tracerLines,"tracerOrigin","Origin",{"Bottom","Center","Top","Mouse"})
 	dropdown(tracerLines,"tracerTarget","Destination",{"Top","Center","Bottom"})
 	toggle(tracerLines,"tracerUseEntityColor","Use team / visibility color")
 	color(tracerLines,"tracerColor","Custom line color")
 	slider(tracerLines,"tracerOpacity","Line opacity",0,1,.01)
 	slider(tracerLines,"tracerThickness","Line thickness",.1,8,.1)
-	local tracerBorders=tracers:NewSection("Border","right")
+	local tracerBorders=tracers:NewSection("Border","full")
 	toggle(tracerBorders,"tracerBorder","Show border")
 	color(tracerBorders,"tracerBorderColor","Border color")
 	slider(tracerBorders,"tracerBorderOpacity","Border opacity",0,1,.01)
@@ -1331,6 +1419,8 @@ local okUI,whyUI=pcall(function()
 	screen:AddLabel({text="Aim state",get=function()return "Aim: "..(APP.stats.aimReason or "Starting")end})
 	screen:AddLabel({text="Entities",get=function()return string.format("Enemies %d / allies %d / drawn %d",APP.stats.enemies or 0,APP.stats.allies or 0,APP.stats.drawn or 0)end})
 	screen:AddLabel({text="Last error",get=function()return APP.stats.lastError or "No errors" end})
+	screen:AddLabel({text="Team source",get=function()return (APP.stats.teamSource or "Starting").." | "..(APP.stats.localTeam or "Unknown")end})
+	--[=[ Temporarily hidden: viewmodel controls remain preserved for restoration.
 	local view=w:NewTab("Viewmodel","Hands and equipped item; sleeves excluded")
 	for _,entry in ipairs({{"arms","Hands","left"},{"weapon","Equipped item","right"}})do
 		local prefix,title,side=entry[1],entry[2],entry[3]
@@ -1338,19 +1428,34 @@ local okUI,whyUI=pcall(function()
 		toggle(section,prefix.."Enabled","Customize "..title:lower())
 		for _,channel in ipairs({"Red","Green","Blue"})do slider(section,prefix..channel,channel,0,255,1)end
 		dropdown(section,prefix.."Material","Material",choices[prefix.."Material"])
-		section:AddParagraph({text="Requires Jael X 1.31.27 or newer. Only hand meshes and the equipped item are customized. Sleeves, textures and arm anchors remain untouched. Select Neon for the previously tested recoloring path. Unsupported or ambiguous pieces are skipped."})
+		section:AddParagraph({text="Temporarily unavailable after a live animation regression. Saved preferences are retained; no viewmodel color, material, transform or physics writes are submitted."})
 	end
 	view:NewSection("Status","left"):AddLabel({text="Viewmodel state",get=function()return APP.stats.viewmodelError or ((APP.stats.viewmodelParts or 0).." tracked parts")end})
 	view:NewSection("Excluded parts","left"):AddParagraph({text="Sleeves, invisible arm anchors and unidentified hand accessories are excluded. Saved sleeve settings are retained for compatibility and do not activate writes."})
+	]=]
 	local environment=w:NewTab("Environment","Brightness and ambient tint")
 	local bright=environment:NewSection("Lighting","left")
 	toggle(bright,"fullBright","Full bright")
-	bright:AddParagraph({text="Adjusts Brightness, Ambient, OutdoorAmbient and GlobalShadows. Custom ambient color stays active when Full bright is enabled. Original values restore when their controls are disabled or the script unloads."})
-	bright:AddLabel({text="Lighting state",get=function()return APP.stats.environmentError or "Ready"end})
+	bright:AddParagraph({text="Uses supported Brightness, Ambient and GlobalShadows controls. OutdoorAmbient is optional and skipped when unavailable. Custom ambient color stays active when Full bright is enabled. Original values restore when their controls are disabled or the script unloads."})
+	bright:AddLabel({text="Lighting state",get=function()return APP.stats.environmentError or string.format("%d properties active",APP.stats.environmentApplied or 0)end})
+	bright:AddLabel({text="Native availability",get=function()return APP.stats.environmentUnavailable and ("Unavailable: "..APP.stats.environmentUnavailable)or "Available controls use verified native writes"end})
 	local tint=environment:NewSection("Ambient color","right")
 	toggle(tint,"environmentEnabled","Custom ambient color")
 	for _,channel in ipairs({"Red","Green","Blue"})do slider(tint,"environment"..channel,channel,0,255,1)end
 	tint:AddParagraph({text="Ambient tint colors the lighting; existing materials and textures still contribute to the scene. Sky time remains unchanged."})
+	local settings=w:NewTab("Settings","Menu shortcuts, theme and saved preferences")
+	local menu=settings:NewSection("Interface","full")
+	APP.controls.menuKey=menu:AddKeybind({text="Open / close menu",flag="pf/menuKey",default=CFG.menuKey,mode="Press",onChanged=function(key)
+		local ok,err=pcall(changed,"menuKey",key);if not ok then Library:Notify("Menu shortcut",tostring(err));Library:SetToggleKey(CFG.menuKey)end
+	end})
+	color(menu,"menuAccent","Interface accent")
+	local storage=settings:NewSection("Saved preferences","full")
+	APP.controls.saveSettings=storage:AddButton({text="Save settings now",callback=function()
+		local ok,err=saveConfig();if not ok then Library:Notify("Save failed",tostring(err));return end
+		Library:Notify("Settings saved","Colors, shortcuts and feature options saved")
+	end})
+	storage:AddParagraph({text="Feature options, interface accent and menu shortcut save automatically when changed. This saves preferences, not a new copy of the Lua source. The Configs tab stores named profiles. F4 or End always unloads the script."})
+	storage:AddLabel({text="Save state",get=function()return APP.stats.settingsError or "Automatic saving enabled"end})
 	local utility=w:NewTab("Runtime","Performance, profiles and lifecycle")
 	screen:AddLabel({text="Selected body part",get=function()return "Aim point: "..(APP.stats.targetPart or "None")end})
 	screen:AddLabel({text="Raycast state",get=function()return APP.stats.raycastState or "Waiting for scan"end})
@@ -1361,7 +1466,7 @@ local okUI,whyUI=pcall(function()
 	toggle(performance,"fastInfoESP","Lightweight bounds for names / boxes / bars / tracers")
 	performance:AddLabel({text="Pose work",get=function()return string.format("Read %d parts | pose %.2f ms | adapter %.2f ms",APP.stats.poseParts or 0,APP.stats.poseReadMs or 0,APP.stats.adapterMs or 0)end})
 	toggle(performance,"lightweight","Lightweight visibility batches")
-	performance:AddLabel({text="ESP follows the Jael X overlay refresh rate"})
+	performance:AddLabel({text="ESP follows the Prism overlay refresh rate"})
 	slider(performance,"rosterRate","Roster refresh (seconds)",.2,2,.1)
 	performance:AddParagraph({text="Rendering follows the app overlay rate with no script FPS cap. One native pose batch feeds all Entity List features. Silhouette applies fill once per character. The registry loop only discovers or removes models."})
 	performance:AddButton({text="Rebuild visibility cache",callback=function()
@@ -1369,16 +1474,21 @@ local okUI,whyUI=pcall(function()
 		prepareRayCache(root,true);Library:Notify("Map cache","Rebuilding map scan; aim waits until complete")
 	end})
 	performance:AddButton({text="Refresh players now",callback=function()local ok,err=pcall(refreshRoster);if not ok then report(err)else Library:Notify("Roster refreshed",#roster.." character models")end end})
-	performance:AddButton({text="Save current settings",callback=function()saveConfig();local ok,err=w:SaveConfig("Last session");assert(ok,err);Library:Notify("Saved","Current settings and JoX profile saved")end})
+	performance:AddButton({text="Save current settings",callback=function()saveConfig();local ok,err=w:SaveConfig("Last session");assert(ok,err);Library:Notify("Saved","Current settings and Prism profile saved")end})
 	performance:AddButton({text="Unload everything",callback=APP.stop})
-	performance:AddParagraph({text="Insert: menu. F2: aim. F3: chams. F4 or End: unload. Options autosave; Configs stores named profiles. Unload disconnects every signal and removes all Drawing objects."})
+	performance:AddParagraph({text="Menu shortcut is configurable under Settings. F2: aim. F3: chams. F4 or End: unload. Options autosave; Configs stores named profiles. Unload disconnects every signal and removes all Drawing objects."})
 	combat:Select();Library:SetVisible(true)
-	Library:Notify("PF JoX","Insert opens settings. Hold your aim key with the menu closed.")
+	Library:Notify("Prism PF",CFG.menuKey.." opens settings. Hold your aim key with the menu closed.")
 end)
 if not okUI then
 	APP.menuOpen=false
 	if APP.Library then pcall(function()APP.Library:Unload()end);APP.Library=nil end
-	warn("[PF_ASSIST] JoX UI unavailable: "..tostring(whyUI)..". Core remains active; F2/F3/F4 work.")
+	warn("[PF_ASSIST] Prism UI unavailable: "..tostring(whyUI)..". Core remains active; F2/F3/F4 work.")
 end
-print("[PF_ASSIST] JoX hub loaded. Insert menu; F2 aim; F3 chams; F4/End unload.")
+function APP.diagnostics()
+	local summary={version=SCRIPT_VERSION,rosterReadMs=APP.stats.rosterReadMs,poseReadMs=APP.stats.poseReadMs,adapterMs=APP.stats.adapterMs,maxAdapterMs=APP.stats.maxAdapterMs,rayBatchMs=APP.stats.rayBatchMs,rosterModels=APP.stats.rosterModels,environmentApplied=APP.stats.environmentApplied,environmentUnavailable=APP.stats.environmentUnavailable,teamSource=APP.stats.teamSource,localTeam=APP.stats.localTeam,enemies=APP.stats.enemies,allies=APP.stats.allies,drawn=APP.stats.drawn,unknown=APP.stats.unknown,viewmodelParts=APP.stats.viewmodelParts,viewmodelError=APP.stats.viewmodelError,environmentError=APP.stats.environmentError,aimReason=APP.stats.aimReason,lastError=APP.stats.lastError}
+	print("[PRISM_PF] "..HTTP:JSONEncode(summary))
+end
+task.spawn(function()task.wait(2);if running()then APP.diagnostics()end end)
+print("[PF_ASSIST] Prism hub loaded. Insert menu; F2 aim; F3 chams; F4/End unload.")
 while running()do task.wait(.25)end
