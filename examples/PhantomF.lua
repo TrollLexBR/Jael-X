@@ -20,7 +20,7 @@
 ]]
 
 --=========================== LIFECYCLE ==========================--
-local SCRIPT_VERSION = "1.1.2"
+local SCRIPT_VERSION = "1.1.5"
 local ENV = shared
 if ENV.PF_ASSIST and ENV.PF_ASSIST.stop then
 	pcall(ENV.PF_ASSIST.stop)
@@ -48,8 +48,11 @@ local UIS = game:GetService("UserInputService")
 local RS = game:GetService("RunService")
 local CFG = {
 	menuKey="Insert", menuAccent=Color3.fromRGB(160,110,255),
+	timeOfDayEnabled=false, timeOfDay=12,
 	fullBright=false, environmentEnabled=false, environmentRed=255, environmentGreen=80, environmentBlue=180,
-	sleevesEnabled=false, sleevesRed=255, sleevesGreen=80, sleevesBlue=180,
+	sleevesEnabled=false, sleevesRed=255, sleevesGreen=80, sleevesBlue=180, sleevesMaterial="Neon",
+	glovesEnabled=false, glovesRed=255, glovesGreen=80, glovesBlue=180, glovesMaterial="Neon",
+	watchEnabled=false, watchRed=255, watchGreen=80, watchBlue=180, watchMaterial="Neon",
 	armsEnabled=false, armsRed=255, armsGreen=80, armsBlue=180, armsMaterial="Neon",
 	weaponEnabled=false, weaponRed=100, weaponGreen=180, weaponBlue=255, weaponMaterial="Neon",
 	esp = true, skeleton = false,
@@ -92,7 +95,9 @@ for _, kind in ipairs({"chams", "box", "skeleton", "tracer", "name"}) do
 	CFG[kind .. "Color"] = Color3.new(1, 1, 1)
 end
 local ranges = {
+	timeOfDay={0,24},
 	sleevesRed={0,255},sleevesGreen={0,255},sleevesBlue={0,255},environmentRed={0,255},environmentGreen={0,255},environmentBlue={0,255},
+	glovesRed={0,255},glovesGreen={0,255},glovesBlue={0,255},watchRed={0,255},watchGreen={0,255},watchBlue={0,255},
 	armsRed={0,255},armsGreen={0,255},armsBlue={0,255},weaponRed={0,255},weaponGreen={0,255},weaponBlue={0,255},
 	smoothing={0,100}, fov={40,400}, maxDistance={10,10000}, visualRange={10,10000},
 	opacity={0,1}, nameSize={6,64}, thickness={.1,8}, rosterRate={.2,2},
@@ -112,6 +117,7 @@ local choices = {
 	healthSide={"Left","Right","Bottom"}, nameFont={"Segoe UI","Arial","Consolas","Tahoma"},
 	targetMode={"Closest to crosshair","Closest to player","Lowest health"}, targetPart={"Head","Torso"},
 }
+for _,prefix in ipairs({"gloves","watch","sleeves"})do choices[prefix.."Material"]=choices.armsMaterial end
 local function normalizeSetting(key, value)
 	if type(CFG[key]) == "boolean" then assert(type(value)=="boolean", "Expected boolean");return value end
 	if ranges[key] then
@@ -1112,7 +1118,6 @@ task.spawn(function()while running() do local started=os.clock();local ok,err=pc
 --=========================== LOCAL VIEWMODEL ==========================--
 -- Camera children are used instead of obfuscated model names. Arm models have
 -- a direct BasePart named Arm; the current weapon is the unique other mesh model.
-local viewmodelAppearanceReady=false
 local viewmodelSnapshots={}
 local function sameAppearance(a,b)
 	if typeof(a)=="Color3" and typeof(b)=="Color3" then
@@ -1147,7 +1152,14 @@ local function setViewProperty(part,record,key,value)
 		-- The setter performs native validation; avoid a duplicate synchronous preflight.
 		part[key]=value
 	end)
-	if not ok then record.retries[key]=os.clock()+2;record.errors[key]=tostring(err);APP.stats[record.errorScope or "viewmodelError"]=record.errors[key];return false end
+	if not ok then
+		local message=tostring(err)
+		-- A queued color refresh can temporarily block material on the same piece.
+		-- Retry that on the next frame instead of imposing a two-second delay.
+		local transient=message:find("busy",1,true) or message:find("retry after the next frame",1,true) or message:find("already updating",1,true)
+		local delay=record.errorScope and 2 or (transient and .02 or 5)
+		record.retries[key]=os.clock()+delay;record.errors[key]=message;APP.stats[record.errorScope or "viewmodelError"]=message;return false
+	end
 	record.retries[key]=nil;record.errors[key]=nil
 	state=state or {original=current};state.desired=value;state.last=value;record[key]=state
 	return true
@@ -1166,10 +1178,14 @@ local function collectViewParts(model)
 	return parts
 end
 local function refreshViewmodel()
+	APP.stats.viewmodelParts=0;APP.stats.viewmodelError="Viewmodel disabled pending animation repair"
+	return
+end
+--[=[ Deferred until renderer animation recovery is validated.
+local function refreshViewmodelDeferred()
 	-- Only the restricted hand/equipped-item path is enabled. Native capability
 	-- checks still reject unsupported pieces and builds, including unsupported camera models.
-	if not viewmodelAppearanceReady then APP.stats.viewmodelParts=0;APP.stats.viewmodelError="Viewmodel writes paused: renderer animation regression under investigation";return end
-	if not CFG.armsEnabled and not CFG.sleevesEnabled and not CFG.weaponEnabled then restoreViewmodel();APP.stats.viewmodelParts=0;return end
+	if not CFG.armsEnabled and not CFG.glovesEnabled and not CFG.watchEnabled and not CFG.sleevesEnabled and not CFG.weaponEnabled then restoreViewmodel();APP.stats.viewmodelParts=0;return end
 	local camera=read(workspace,"CurrentCamera")
 	local arms,weapons={},{}
 	for _,model in ipairs(children(camera))do
@@ -1185,25 +1201,35 @@ local function refreshViewmodel()
 	end
 	local active={}
 	APP.stats.viewmodelError=nil
+	APP.stats.viewmodelGroups={}
 	local function apply(model,prefix)
-		local color=Color3.fromRGB(CFG[prefix.."Red"],CFG[prefix.."Green"],CFG[prefix.."Blue"])
 		local selected=CFG[prefix.."Material"]
 		local material=selected~="Original" and Enum.Material[selected] or nil
 		for _,part in ipairs(collectViewParts(model))do
-			local sleeve=prefix=="arms" and read(part,"Name")=="Sleeves"
-			-- SkinTone is the independently tested hand mesh. Leave the sleeve,
-			-- invisible Arm anchor and unidentified glove/accessory meshes alone.
-			local allowed=not sleeve and (prefix~="arms" or read(part,"Name")=="SkinTone")
-			if allowed and CFG[prefix.."Enabled"]then
-			active[part]=true
-			local parent=read(part,"Parent")
-			local record=viewmodelSnapshots[part]
-			if not record or record.parent~=parent then record={parent=parent};viewmodelSnapshots[part]=record end
-			setViewProperty(part,record,"Color",color);setViewProperty(part,record,"Material",material)
+			local group=prefix
+			if prefix=="arms"then
+				local name=tostring(read(part,"Name")):lower()
+				group=name=="skintone" and "arms" or name=="sleeves" and "sleeves" or name=="watch" and "watch" or (name=="glove" or name=="gloves")and "gloves" or nil
+				if read(part,"ClassName")~="MeshPart" or read(part,"Parent")~=model then group=nil end
+			end
+			-- Invisible Arm anchors, textures and unidentified rig objects stay untouched.
+			if group and CFG[group.."Enabled"]then
+				active[part]=true
+				local parent=read(part,"Parent")
+				local record=viewmodelSnapshots[part]
+				if not record or record.parent~=parent then record={parent=parent};viewmodelSnapshots[part]=record end
+				local color=Color3.fromRGB(CFG[group.."Red"],CFG[group.."Green"],CFG[group.."Blue"])
+				local groupMaterial=group==prefix and material or CFG[group.."Material"]~="Original" and Enum.Material[CFG[group.."Material"]]or nil
+				local colorOK=setViewProperty(part,record,"Color",color)
+				local materialOK=setViewProperty(part,record,"Material",groupMaterial)
+				local state=APP.stats.viewmodelGroups[group]or {parts=0,applied=0}
+				state.parts=state.parts+1
+				if colorOK and materialOK then state.applied=state.applied+1 else state.error=APP.stats.viewmodelError end
+				APP.stats.viewmodelGroups[group]=state
 			end
 		end
 	end
-	if CFG.armsEnabled or CFG.sleevesEnabled then for _,model in ipairs(arms)do apply(model,"arms")end end
+	if CFG.armsEnabled or CFG.glovesEnabled or CFG.watchEnabled or CFG.sleevesEnabled then for _,model in ipairs(arms)do apply(model,"arms")end end
 	-- Ambiguous camera models remain untouched rather than recoloring effects.
 	if CFG.weaponEnabled and #arms>0 and #weapons==1 then apply(weapons[1],"weapon")
 	elseif CFG.weaponEnabled then APP.stats.viewmodelError="Equipped item is unavailable or ambiguous"end
@@ -1216,8 +1242,9 @@ local function refreshViewmodel()
 	end
 	APP.stats.viewmodelParts=count
 end
+]=]
 local environmentOwner,environmentRecord=nil,nil
-local environmentKeys={"Ambient","OutdoorAmbient","Brightness","GlobalShadows"}
+local environmentKeys={"Ambient","OutdoorAmbient","Brightness","GlobalShadows","ClockTime"}
 restoreEnvironment=function()
 	if environmentOwner and environmentRecord then
 		for _,key in ipairs(environmentKeys)do restoreViewProperty(environmentOwner,environmentRecord,key)end
@@ -1225,14 +1252,14 @@ restoreEnvironment=function()
 	environmentOwner,environmentRecord=nil,nil
 end
 local function refreshEnvironment()
-	if not CFG.fullBright and not CFG.environmentEnabled then restoreEnvironment();APP.stats.environmentApplied=0;return end
+	if not CFG.fullBright and not CFG.environmentEnabled and not CFG.timeOfDayEnabled then restoreEnvironment();APP.stats.environmentApplied=0;return end
 	local lighting=game:GetService("Lighting")
 	if lighting~=environmentOwner then restoreEnvironment();environmentOwner=lighting;environmentRecord={parent=read(lighting,"Parent"),errorScope="environmentError"}end
 	APP.stats.environmentError=nil;APP.stats.environmentApplied=0
 	local skipped={}
-	local tint=CFG.environmentEnabled and Color3.fromRGB(CFG.environmentRed,CFG.environmentGreen,CFG.environmentBlue)or Color3.new(1,1,1)
+	local tint=CFG.environmentEnabled and Color3.fromRGB(CFG.environmentRed,CFG.environmentGreen,CFG.environmentBlue)or (CFG.fullBright and Color3.new(1,1,1)or nil)
 	local shadows=nil;if CFG.fullBright then shadows=false end
-	local desired={Ambient=tint,OutdoorAmbient=tint,Brightness=CFG.fullBright and 3 or false,GlobalShadows=shadows}
+	local desired={Ambient=tint,OutdoorAmbient=tint,Brightness=CFG.fullBright and 3 or false,GlobalShadows=shadows,ClockTime=CFG.timeOfDayEnabled and CFG.timeOfDay or nil}
 	for _,key in ipairs(environmentKeys)do
 		local value=desired[key];if key=="Brightness" and value==false then value=nil end
 		environmentRecord.capabilities=environmentRecord.capabilities or {}
@@ -1253,15 +1280,11 @@ APP.restoreEnvironment=restoreEnvironment
 	while running()do local ok,err=pcall(refreshEnvironment);if not ok then APP.stats.environmentError=tostring(err)end;task.wait(.1)end
  end)
 APP.stats.viewmodelParts=0
-APP.stats.viewmodelError="Viewmodel controls temporarily hidden"
---[=[ Temporarily disabled with the hidden viewmodel menu.
+APP.stats.viewmodelError="Viewmodel disabled pending animation repair"
 APP.refreshViewmodel=refreshViewmodel
 APP.restoreViewmodel=restoreViewmodel
- task.spawn(function()
-	while running()do local ok,err=pcall(refreshViewmodel);if not ok then APP.stats.viewmodelError=tostring(err)end;task.wait(.5)end
- end)
+-- No viewmodel worker is started while animation recovery is unresolved.
 
-]=]
 
 --=========================== PRISM INTERFACE ==========================--
 local okUI,whyUI=pcall(function()
@@ -1285,6 +1308,37 @@ local okUI,whyUI=pcall(function()
 	local function color(section,key,title)
 		local handle=section:AddColorPicker({text=title,flag="pf/"..key,default=CFG[key],callback=function(value)changed(key,value)end})
 		APP.controls[key]=handle;return handle
+	end
+	local function rgbPicker(section,prefix,title)
+		local handle=section:AddColorPicker({text=title,flag="pf/"..prefix.."Color",default=Color3.fromRGB(CFG[prefix.."Red"],CFG[prefix.."Green"],CFG[prefix.."Blue"]),callback=function(value)
+			assert(typeof(value)=="Color3","Expected a color")
+			CFG[prefix.."Red"]=normalizeSetting(prefix.."Red",value.R*255)
+			CFG[prefix.."Green"]=normalizeSetting(prefix.."Green",value.G*255)
+			CFG[prefix.."Blue"]=normalizeSetting(prefix.."Blue",value.B*255)
+			APP.styleRevision=APP.styleRevision+1;saveConfig()
+		end})
+		APP.controls[prefix.."Color"]=handle;return handle
+	end
+	-- Preserve named profiles from the former three-slider controls.
+	local importConfig=w.ImportConfig
+	function w:ImportConfig(raw)
+		local config=type(raw)=="string" and HTTP:JSONDecode(raw)or raw
+		assert(type(config)=="table" and type(config.values)=="table","Invalid config format")
+		config=table.clone(config);config.values=table.clone(config.values)
+		for _,prefix in ipairs({"arms","gloves","watch","sleeves","weapon","environment"})do
+			local flag="pf/"..prefix.."Color"
+			if config.values[flag]==nil then
+				local rgb,found={},false
+				for i,channel in ipairs({"Red","Green","Blue"})do
+					local old=config.values["pf/"..prefix..channel]
+					local value=type(old)=="table" and old.value or old
+					if value~=nil then found=true end
+					rgb[i]=normalizeSetting(prefix..channel,value~=nil and value or CFG[prefix..channel])
+				end
+				if found then config.values[flag]={value=rgb}end
+			end
+		end
+		return importConfig(self,config)
 	end
 	local function toggle(section,key,title)
 		local handle=section:AddToggle({text=title,flag="pf/"..key,default=CFG[key],callback=function(value)changed(key,value)end})
@@ -1420,20 +1474,21 @@ local okUI,whyUI=pcall(function()
 	screen:AddLabel({text="Entities",get=function()return string.format("Enemies %d / allies %d / drawn %d",APP.stats.enemies or 0,APP.stats.allies or 0,APP.stats.drawn or 0)end})
 	screen:AddLabel({text="Last error",get=function()return APP.stats.lastError or "No errors" end})
 	screen:AddLabel({text="Team source",get=function()return (APP.stats.teamSource or "Starting").." | "..(APP.stats.localTeam or "Unknown")end})
-	--[=[ Temporarily hidden: viewmodel controls remain preserved for restoration.
-	local view=w:NewTab("Viewmodel","Hands and equipped item; sleeves excluded")
-	for _,entry in ipairs({{"arms","Hands","left"},{"weapon","Equipped item","right"}})do
+	--[=[ Viewmodel menu temporarily hidden; saved settings are retained.
+	local view=w:NewTab("Viewmodel","Hands, gloves, watch, sleeves and equipped item")
+	for _,entry in ipairs({{"arms","Hands","left"},{"gloves","Gloves","right"},{"watch","Watch","left"},{"sleeves","Sleeves","right"},{"weapon","Equipped item","left"}})do
 		local prefix,title,side=entry[1],entry[2],entry[3]
 		local section=view:NewSection(title,side)
 		toggle(section,prefix.."Enabled","Customize "..title:lower())
-		for _,channel in ipairs({"Red","Green","Blue"})do slider(section,prefix..channel,channel,0,255,1)end
+		rgbPicker(section,prefix,"Color")
 		dropdown(section,prefix.."Material","Material",choices[prefix.."Material"])
-		section:AddParagraph({text="Temporarily unavailable after a live animation regression. Saved preferences are retained; no viewmodel color, material, transform or physics writes are submitted."})
+		section:AddParagraph({text="Each group has independent color and material. Native support is required; the status below reports rejected parts. Disable restores supported parts."})
+		section:AddLabel({text="Native state",get=function()local state=APP.stats.viewmodelGroups and APP.stats.viewmodelGroups[prefix];return not CFG[prefix.."Enabled"]and "Disabled" or not state and "No matching parts" or state.error or (state.applied.." / "..state.parts.." parts applied")end})
 	end
 	view:NewSection("Status","left"):AddLabel({text="Viewmodel state",get=function()return APP.stats.viewmodelError or ((APP.stats.viewmodelParts or 0).." tracked parts")end})
-	view:NewSection("Excluded parts","left"):AddParagraph({text="Sleeves, invisible arm anchors and unidentified hand accessories are excluded. Saved sleeve settings are retained for compatibility and do not activate writes."})
+	view:NewSection("Excluded parts","left"):AddParagraph({text="Invisible arm anchors and unidentified rig objects remain excluded. Gloves, watch and sleeves need native renderer support; enabling a group does not bypass validation."})
 	]=]
-	local environment=w:NewTab("Environment","Brightness and ambient tint")
+	local environment=w:NewTab("Environment","Brightness, ambient tint and time of day")
 	local bright=environment:NewSection("Lighting","left")
 	toggle(bright,"fullBright","Full bright")
 	bright:AddParagraph({text="Uses supported Brightness, Ambient and GlobalShadows controls. OutdoorAmbient is optional and skipped when unavailable. Custom ambient color stays active when Full bright is enabled. Original values restore when their controls are disabled or the script unloads."})
@@ -1441,8 +1496,12 @@ local okUI,whyUI=pcall(function()
 	bright:AddLabel({text="Native availability",get=function()return APP.stats.environmentUnavailable and ("Unavailable: "..APP.stats.environmentUnavailable)or "Available controls use verified native writes"end})
 	local tint=environment:NewSection("Ambient color","right")
 	toggle(tint,"environmentEnabled","Custom ambient color")
-	for _,channel in ipairs({"Red","Green","Blue"})do slider(tint,"environment"..channel,channel,0,255,1)end
-	tint:AddParagraph({text="Ambient tint colors the lighting; existing materials and textures still contribute to the scene. Sky time remains unchanged."})
+	rgbPicker(tint,"environment","Ambient color")
+	tint:AddParagraph({text="Ambient tint colors the lighting; existing materials and textures still contribute to the scene. Time of day is controlled separately."})
+	local daylight=environment:NewSection("Time of day","left")
+	toggle(daylight,"timeOfDayEnabled","Override time of day")
+	slider(daylight,"timeOfDay","Time of day (hours)",0,24,.25)
+	daylight:AddParagraph({text="Uses Lighting.ClockTime: 0 is midnight, 12 is noon and 18 is evening. Enable the override to apply the selected hour. Disable it to restore the original time. Settings save automatically."})
 	local settings=w:NewTab("Settings","Menu shortcuts, theme and saved preferences")
 	local menu=settings:NewSection("Interface","full")
 	APP.controls.menuKey=menu:AddKeybind({text="Open / close menu",flag="pf/menuKey",default=CFG.menuKey,mode="Press",onChanged=function(key)
