@@ -51,9 +51,53 @@ local HOTBAR_KEYS = {
 local KEY_RETURN = 13
 local KEY_SPACE = 32
 
+local SCRIPT_VERSION="0.1.0"
+local newWatchdog=(function()
+-- Pure watchdog policy. Caller owns focus-gated input and current character reads.
+local function newWatchdog()
+ local w={attempts=0,recoveries=0,status="Watching",cooldown=0}
+ function w:reset()
+  self.stage=nil;self.since=nil;self.character=nil;self.rod=nil;self.slot=nil;self.attempts=0;self.cooldown=0
+ end
+ function w:step(o)
+  local t=o.now
+  if not o.enabled or not o.ready then self:reset();return end
+  if self.character and self.character~=o.character then self:reset()end
+  self.character=o.character
+  if not o.focused then self.since=nil;if self.stage then self.deadline=t+1 end;return end
+  if self.stage then
+   if t<self.deadline then return end
+   if self.stage=="Stored"then
+    if o.rod==self.rod then self.stage=nil;self.since=nil;self.cooldown=t+5;self.status="Rod did not stow; retrying later";return end
+    if o.rod then self.stage=nil;self.since=nil;self.cooldown=t+5;self.status="Another tool is active; recovery cancelled";return end
+    self.stage="Equipped";self.deadline=t+1.5;return "equip",self.slot
+   end
+   if o.rod==self.rod and not o.bobber then
+    self.recoveries=self.recoveries+1;self.stage=nil;self.since=nil;self.cooldown=t+1;self.status="Rod recovered; retrying cast";return "recovered"
+   end
+   self.stage=nil;self.since=nil;self.cooldown=t+5;self.status="Rod recovery unconfirmed; retrying later";return
+  end
+  if o.busy or o.gui or not o.rod or not o.bobber then self.since=nil;if o.gui then self.attempts=0 end;return end
+  if t<self.cooldown then return end
+  self.since=self.since or t
+  if t-self.since<o.timeout then return end
+  if not o.slot then self.status="Recovery needs a confirmed rod hotbar slot";self.since=t;return "slot_missing"end
+  if self.attempts>=3 then self.status="Repeated stalled casts; automation paused";return "pause"end
+  self.attempts=self.attempts+1;self.rod=o.rod;self.slot=o.slot;self.stage="Stored";self.deadline=t+1
+  self.status="Stalled bobber: storing rod";return "store",self.slot
+ end
+ function w:inputFailed(t)self.stage=nil;self.since=nil;self.cooldown=t+5;self.status="Recovery input failed; retrying later"end
+ return w
+end
+return newWatchdog
+
+end)()
+local watchdog=newWatchdog()
 --=========================== SETTINGS ==========================--
 local state = {
 	enabled = false,
+	stuckRecovery = true,
+	stuckTimeoutSeconds = 45,
 	autoCast = true,
 	autoEquip = true,
 	autoShake = true,
@@ -1105,6 +1149,7 @@ end
 
 function APP.setEnabled(value)
 	APP.generation = APP.generation + 1
+	watchdog:reset()
 	releaseMouse();releaseHeldKeys()
 	inputBusy = false
 	resetReelController()
@@ -1155,11 +1200,43 @@ APP.getDiagnostics = function()
 		jumpPending = jumpCycle.pending, catchesSinceJump = jumpCycle.catches, jumpTarget = jumpCycle.target,
 		characterReady = characterReady, rodEquipped = equippedTool() ~= nil,
 		geometryMissing = stats.geometryMissing,
+		version = SCRIPT_VERSION, watchdogStatus = watchdog.status, recoveries = watchdog.recoveries, recoveryAttempts = watchdog.attempts,
 		equipSlot = equipAttempt and equipAttempt.slot or equippedRodSlot,
 	}
 end
 APP.dumpGui = dumpFishingGui
 
+local function runStuckRecovery(fish,playerBar)
+ local tool=equippedTool()
+ local slot=math.floor(state.jumpRodSlot)>0 and math.clamp(math.floor(state.jumpRodSlot),1,10)or equippedRodSlot
+ local action,keySlot=watchdog:step({now=now(),enabled=state.enabled and state.stuckRecovery,ready=characterReady,
+  character=LP and read(LP,"Character"),focused=inputFocused(),rod=tool,bobber=hasBobber(tool),
+  gui=(fish~=nil and playerBar~=nil)or findActiveShakeButton(guiCache.buttons)~=nil,
+  busy=inputBusy or jumpCycle.stage~=nil,slot=slot,timeout=math.max(15,state.stuckTimeoutSeconds)})
+ if action=="store"then
+  local released=releaseMouse();releaseHeldKeys();local jumpReleased=releaseJumpKey()
+  if not released or not jumpReleased or next(heldKeys)then watchdog:inputFailed(now());status="Recovery waiting for input release";return true end
+  resetReelController()
+  fishingSessionActive,reelWasSeen=false,false
+  reelEnding,reelQuietSince,reelProgressPercent=false,nil,nil
+  reelGuiObject,reelFishObject,reelPlayerBarObject=nil,nil,nil
+  lastReelDetectedAt,lastReelFishX,lastReelPlayerX=nil,nil,nil
+  nextReelLookupAt,lastReelMotionAt=0,0
+  guiCache.dirty=true;equipAttempt=nil
+  log("Watchdog: stalled bobber; storing rod in confirmed slot "..keySlot.." (attempt "..watchdog.attempts..")")
+ end
+ if action=="store"or action=="equip"then
+  if not tapKey(HOTBAR_KEYS[keySlot],state.equipKeyHoldMs)then watchdog:inputFailed(now())end
+ elseif action=="recovered"then
+  lastCastAt=-math.huge;nextEquipAt=now()+1;jumpCycle.castBlockedUntil=now()+1
+  guiCache.objects,guiCache.buttons,guiCache.roots={},{},{};guiCache.dirty=true
+  log("Watchdog: rod re-equipped and bobber cleared; retrying. No catch credited.")
+ elseif action=="pause"then
+  local reason=watchdog.status;APP.setEnabled(false);status=reason;warn(TAG.." "..reason)
+ elseif action=="slot_missing"then log(watchdog.status.."; configure Rod hotbar slot")end
+ if action or watchdog.stage then status=watchdog.status;setPhase("Recovery");return true end
+ return false
+end
 --=========================== JOX LIBRARY UI ==========================--
 local LIBRARY_URL = "https://raw.githubusercontent.com/TrollLexBR/Jael-X/main/JoX-Library.lua"
 local okLibrary, resultLibrary = pcall(function()
@@ -1187,6 +1264,8 @@ local okUI, uiError = pcall(function()
 		return section:AddSlider({text = text, flag = "fisch/" .. key, min = min, max = max, step = 1, default = state[key], callback = function(value) state[key] = value end})
 	end
 	masterToggle = core:AddToggle({text = "Master switch (F1)", flag = "fisch/enabled", default = false, callback = APP.setEnabled})
+	toggle(core, "Recover stalled bobber", "stuckRecovery")
+	slider(core, "Stalled bobber timeout (seconds)", "stuckTimeoutSeconds", 15, 180)
 	toggle(core, "Auto cast", "autoCast")
 	toggle(core, "Auto equip rod", "autoEquip")
 	toggle(core, "Auto shake", "autoShake")
@@ -1197,6 +1276,7 @@ local okUI, uiError = pcall(function()
 	local live = fishing:NewSection("Live status", "right")
 	live:AddLabel({get = function()return (state.enabled and "ON" or "OFF") .. " / " .. phase end})
 	live:AddLabel({get = function()return status end})
+	live:AddLabel({get = function()return "Recovery: " .. watchdog.status .. " / " .. watchdog.recoveries end})
 	live:AddLabel({get = function()return string.format("Casts: %d / Shakes: %d", stats.casts, stats.shakes) end})
 	live:AddLabel({get = function()return string.format("Reel samples: %d / Misses: %d", stats.reelSamples, stats.reelMisses) end})
 	live:AddLabel({get = function()return "Detection: " .. reelDetectionStatus end})
@@ -1268,16 +1348,17 @@ APP.connections[#APP.connections + 1] = hotkeyConnection
 task.spawn(function()
 	while running() do
 		if jumpCycle.keyHeld and (not state.enabled or jumpCycle.stage ~= "Jump") then pcall(releaseJumpKey) end
-		if not state.enabled then releaseMouse();releaseHeldKeys() end
+		if not state.enabled then watchdog:reset();releaseMouse();releaseHeldKeys() end
 		if state.enabled then
 			local ok, message = pcall(function()
 				if jumpCycle.keyHeld and jumpCycle.stage ~= "Jump" and not releaseJumpKey() then return end
-				if not checkCharacterState() then return end
+				if not checkCharacterState() then watchdog:reset();return end
 				pollJumpCatches()
 				if not inputFocused() then
 					releaseMouse()
 					releaseJumpKey()
 					resetReelController()
+					watchdog:step({now=now(),enabled=state.enabled and state.stuckRecovery,ready=characterReady,character=trackedCharacter,focused=false})
 					status = APP.inputReason or "Input paused"
 					return
 				end
@@ -1290,6 +1371,7 @@ task.spawn(function()
 					status = "Fishing session timed out"
 				end
 				local fish, playerBar = findReelBars()
+				if runStuckRecovery(fish,playerBar) then return end
 				if APP.geometryBlocked then
 					APP.geometryBlocked = false
 					releaseMouse();resetReelController()
@@ -1380,6 +1462,6 @@ function APP.stop()
 	log("unloaded.")
 end
 
-log("loaded. Keyboard backend: input.key_down/input.key_up")
+log("loaded v"..SCRIPT_VERSION..". Keyboard backend: input.key_down/input.key_up")
 log("F1 toggles automation, Insert toggles UI, and F4 unloads.")
 while running() do task.wait(0.25) end
