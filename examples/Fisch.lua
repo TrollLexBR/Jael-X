@@ -153,7 +153,6 @@ local inputBusy = false
 local lastCastAt = -math.huge
 local nextShakeAt = 0
 local nextEquipAt = 0
-local nextHotbarSlot = 1
 local recognizedRodName = nil
 local equipAttempt = nil
 local equippedRodSlot = nil
@@ -795,24 +794,34 @@ local function runAutoEquip()
 	if inputBusy then return true end
 	if equipAttempt then
 		if now() < equipAttempt.deadline then
-			status = "Confirming rod in slot " .. equipAttempt.slot
+			status = "Confirming rod in slot 1"
 			return true
 		end
-		nextHotbarSlot = equipAttempt.slot % #HOTBAR_KEYS + 1
 		equipAttempt = nil
 		nextEquipAt = now() + state.equipRetryMs / 1000
 	end
-	if now() < nextEquipAt then status = "Searching hotbar for a fishing rod"; return true end
-	local slot = nextHotbarSlot
-	if not tapKey(HOTBAR_KEYS[slot], state.equipKeyHoldMs) then
+	if now() < nextEquipAt then status = "Waiting to retry rod equip (2 -> 1)"; return true end
+	if not releaseMouse() then return true end
+
+	local generation = APP.generation
+	local character = read(LP, "Character")
+	status = "Re-equipping rod (2 -> 1)"
+	if tapKey(HOTBAR_KEYS[2], state.equipKeyHoldMs) then
+		task.wait(state.equipSettleMs / 1000)
+		if not running() or not state.enabled or not state.autoEquip
+			or APP.generation ~= generation or read(LP, "Character") ~= character then
+			return true
+		end
+		if tapKey(HOTBAR_KEYS[1], state.equipKeyHoldMs) then
+			equipAttempt = {slot = 1, deadline = now() + math.max(450, state.equipSettleMs) / 1000}
+			status = "Confirming rod in slot 1"
+			return true
+		end
+	end
+	if running() and state.enabled and APP.generation == generation then
 		nextEquipAt = now() + state.equipRetryMs / 1000
 		status = inputFocused() and "Hotbar input failed" or "Waiting for Roblox focus"
-		return true
 	end
-	if not running() or not state.enabled then return true end
-	-- Wait across worker ticks so a delayed equip is not toggled back off.
-	equipAttempt = {slot = slot, deadline = now() + math.max(450, state.equipSettleMs) / 1000}
-	status = "Confirming rod in slot " .. slot
 	return true
 end
 
@@ -926,7 +935,7 @@ local function checkCharacterState()
 		lastReelFishX, lastReelPlayerX, lastReelDetectedAt = nil, nil, nil
 		lastReelMotionAt, nextReelLookupAt = 0, 0
 		equipAttempt, recognizedRodName = nil, nil
-		nextHotbarSlot, nextEquipAt = equippedRodSlot or 1, 0
+		nextEquipAt = 0
 		lossCycle.object, lossCycle.active, lossCycle.hold = nil, false, nil
 		guiCache.objects, guiCache.buttons, guiCache.roots = {}, {}, {}
 		guiCache.dirty = true
@@ -1171,7 +1180,7 @@ function APP.setEnabled(value)
 	if state.enabled then
 		-- A stationary cursor over the open menu previously blocked every input.
 		if Library then Library:SetVisible(false) end
-		nextHotbarSlot, nextEquipAt = equippedRodSlot or 1, 0
+		nextEquipAt = 0
 		equipAttempt = nil
 		nextCharacterCheckAt = 0
 		setPhase("Check")
@@ -1283,7 +1292,7 @@ local okUI, uiError = pcall(function()
 	live:AddProgress({text = "Reel progress", get = function()return (reelProgressPercent or 0) / 100 end})
 	live:AddButton({text = "Dump fishing GUI (F3)", callback = dumpFishingGui})
 	live:AddButton({text = "Stop and unload (F4)", callback = function()if APP.stop then APP.stop()end end})
-	live:AddParagraph({text = "Equip a fishing rod and stand by water. Enable Mouse & keyboard in Jael X. Automation pauses while you interact with this menu or leave Roblox focus."})
+	live:AddParagraph({text = "Put your fishing rod in hotbar slot 1 and stand by water. Auto equip presses 2 then 1 when the rod is missing. Enable Mouse & keyboard in Jael X. Automation pauses while you interact with this menu or leave Roblox focus."})
 	local timing = win:NewTab("Timing", "Delays in milliseconds")
 	local cast = timing:NewSection("Cast and equip", "left")
 	for _, item in ipairs({{"Cast hold minimum", "castHoldMinMs", 100,2500},{"Cast hold maximum","castHoldMaxMs",100,2500},
